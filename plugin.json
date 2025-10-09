@@ -1,0 +1,25 @@
+{
+  "slug": "BasicPlugin",
+  "name": "Basic Plugin",
+  "version": "2.0.0",
+  "license": "proprietary",
+  "brand": "Basic Plugin",
+  "author": "Aran",
+  "authorEmail": "",
+  "authorUrl": "",
+  "pluginUrl": "",
+  "manualUrl": "",
+  "sourceUrl": "",
+  "donateUrl": "",
+  "changelogUrl": "",
+  "modules": [
+    {
+      "slug": "BasicModule",
+      "name": "BasicModule",
+      "description": "Simple sine oscillator",
+      "tags": [
+        "VCO"
+      ]
+    }
+  ]
+}
