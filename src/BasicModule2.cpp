@@ -62,7 +62,7 @@ struct SimpleScope : TransparentWidget {
     }
 };
 
-struct BasicModule : Module {
+struct BasicModule2 : Module {
     enum ParamId {
         PITCH_PARAM,
         PARAMS_LEN
@@ -86,9 +86,9 @@ struct BasicModule : Module {
     // Oscilloscope
     SimpleScope* scope = nullptr;
     int scopeSampleCount = 0;
-    static const int SCOPE_DOWNSAMPLE = 32; // Only send every Nth sample to scope
+    static const int SCOPE_DOWNSAMPLE = 8; // Only send every Nth sample to scope
 
-    BasicModule() {
+    BasicModule2() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
         configParam(PITCH_PARAM, 0.f, 1.f, 0.f, "Pitch");
         configInput(PITCH_INPUT, "1V/Oct");
@@ -130,33 +130,34 @@ struct BasicModule : Module {
     }
 };
 
-struct BasicModuleWidget : ModuleWidget {
-    BasicModuleWidget(BasicModule* module) {
+struct BasicModule2Widget : ModuleWidget {
+    BasicModule2Widget(BasicModule2* module) {
         setModule(module);
-        setPanel(createPanel(asset::plugin(pluginInstance, "res/BasicModule.svg")));
+        setPanel(createPanel(asset::plugin(pluginInstance, "res/BasicModule2.svg")));
 
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(15.24, 46.063)), module, BasicModule2::PITCH_PARAM));
+
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(15.24, 77.478)), module, BasicModule2::PITCH_INPUT));
+
+        addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(15.24, 108.713)), module, BasicModule2::SINE_OUTPUT));
+
+        addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(15.24, 30.224)), module, BasicModule2::BLINK_LIGHT));
+
         // Add oscilloscope display
+        // mm2px(Vec(41.16, 24.856)) was the commented reference point
         if (module) {
             SimpleScope* scope = new SimpleScope();
-            scope->box.pos = mm2px(Vec(5, 30));
-            scope->box.size = mm2px(Vec(20.48, 35));
+            scope->box.pos = mm2px(Vec(43.565, 51.048));
+            scope->box.size = mm2px(Vec(42, 25));
             addChild(scope);
             module->scope = scope;
         }
-
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(15.24, 46.063)), module, BasicModule::PITCH_PARAM));
-
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(15.24, 77.478)), module, BasicModule::PITCH_INPUT));
-
-        addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(15.24, 108.713)), module, BasicModule::SINE_OUTPUT));
-
-        addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(15.24, 25.81)), module, BasicModule::BLINK_LIGHT));
     }
 };
 
-Model* modelBasicModule = createModel<BasicModule, BasicModuleWidget>("BasicModule");
+Model* modelBasicModule2 = createModel<BasicModule2, BasicModule2Widget>("BasicModule2");
