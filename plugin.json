@@ -20,6 +20,22 @@
       "tags": [
         "VCO"
       ]
+    },
+    {
+      "slug": "liMonADe",
+      "name": "liMonADe",
+      "description": "Wavetable oscillator station & additive synth",
+      "tags": [
+        "Oscillator"
+      ]
+    },
+    {
+      "slug": "BasicModule2",
+      "name": "BasicModule2",
+      "description": "",
+      "tags": [
+        "VCO"
+      ]
     }
   ]
 }
