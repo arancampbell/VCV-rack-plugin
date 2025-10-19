@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "dsp/digital.hpp" // Required for SchmittTrigger (though no longer used, can be kept for now)
 
 // Forward-declare the module class so the scope can have a pointer to it.
 struct BasicModule2;
@@ -32,7 +33,8 @@ struct SimpleScope : TransparentWidget {
 struct BasicModule2 : Module {
     enum ParamId {
         PITCH_PARAM,
-        ZOOM_PARAM, // New parameter for oscilloscope zoom
+        ZOOM_PARAM,
+        WAVETYPE_PARAM, // Knob to select the waveform type
         PARAMS_LEN
     };
     enum InputId {
@@ -45,8 +47,12 @@ struct BasicModule2 : Module {
     };
     enum LightId {
         BLINK_LIGHT,
+        // The waveform indicator lights are no longer needed
         LIGHTS_LEN
     };
+
+    // This integer will hold the current waveform type, determined by the knob
+    int waveform = 0;
 
     float phase = 0.f;
     float blinkPhase = 0.f;
@@ -61,28 +67,54 @@ struct BasicModule2 : Module {
     BasicModule2() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
         configParam(PITCH_PARAM, 0.f, 1.f, 0.f, "Pitch");
-        // Configure the new zoom parameter
         configParam(ZOOM_PARAM, 0.f, 1.f, 0.5f, "Zoom");
+        // Add the new knob for selecting waveform type
+        configParam(WAVETYPE_PARAM, 0.f, 1.f, 0.f, "Waveform Type");
         configInput(PITCH_INPUT, "1V/Oct");
         configOutput(SINE_OUTPUT, "Audio");
     }
 
     void process(const ProcessArgs& args) override {
-        // Get pitch from knob and input
+        // --- Waveform Selection from Knob ---
+        float waveValue = params[WAVETYPE_PARAM].getValue();
+
+        // Determine waveform based on the knob's position (0.0 to 1.0)
+        if (waveValue <= 0.25f) {
+            waveform = 0; // 0-25% is Sine
+        } else if (waveValue <= 0.5f) {
+            waveform = 3; // 26-50% is Triangle
+        } else if (waveValue <= 0.75f) {
+            waveform = 1; // 51-75% is Sawtooth
+        } else {
+            waveform = 2; // 76-100% is Square
+        }
+
+        // --- Signal Generation ---
         float pitch = params[PITCH_PARAM].getValue();
         pitch += inputs[PITCH_INPUT].getVoltage();
-        // The default frequency is C4 = 261.6256f
         float freq = dsp::FREQ_C4 * std::pow(2.f, pitch);
 
-        // Accumulate the phase
         phase += freq * args.sampleTime;
         if (phase >= 1.f)
             phase -= 1.f;
 
-        // Compute the sine output
-        float sine = std::sin(2.f * M_PI * phase);
-        // Audio signals are typically +/-5V
-        float output = 5.f * sine;
+        float wave = 0.f;
+        switch (waveform) {
+            case 0: // Sine
+                wave = std::sin(2.f * M_PI * phase);
+                break;
+            case 1: // Sawtooth
+                wave = 2.f * phase - 1.f;
+                break;
+            case 2: // Square
+                wave = (phase < 0.5f) ? 1.f : -1.f;
+                break;
+            case 3: // Triangle
+                wave = 4.f * std::fabs(phase - 0.5f) - 1.f;
+                break;
+        }
+
+        float output = 5.f * wave;
         outputs[SINE_OUTPUT].setVoltage(output);
 
         // Send data to oscilloscope (downsampled to control scroll speed)
@@ -138,28 +170,19 @@ void SimpleScope::drawLayer(const DrawArgs& args, int layer) {
 
     int samplesToDisplay = 256; // Default value in case module isn't set.
     if (module) {
-        // Read the zoom knob's value (0.0 to 1.0).
         float zoomValue = module->params[BasicModule2::ZOOM_PARAM].getValue();
-        // Map the knob's value to a number of samples to display.
-        // A higher zoom value means more zoom, so we display fewer samples.
-        // This creates a range from 2048 samples (zoomed out) to 32 (zoomed in).
         samplesToDisplay = (int)rack::math::rescale(zoomValue, 0.f, 1.f, 2048.f, 32.f);
     }
 
     nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(255, 255, 0, 255));
+    nvgStrokeColor(args.vg, nvgRGBA(0, 255, 100, 255));
     nvgStrokeWidth(args.vg, 1.5);
 
-    // Determine the starting point for reading from the buffer
     int startReadIndex = (writeIndex - samplesToDisplay + BUFFER_SIZE) % BUFFER_SIZE;
 
     for (int i = 0; i < samplesToDisplay; i++) {
         int idx = (startReadIndex + i) % BUFFER_SIZE;
-
-        // Scale X to fit the window, stretching the samples across the full width.
         float x = (float)i / (samplesToDisplay - 1) * box.size.x;
-
-        // Map -5V to +5V to screen space
         float y = box.size.y - ((buffer[idx] + 5.f) / 10.f) * box.size.y;
 
         if (i == 0) {
@@ -184,23 +207,23 @@ struct BasicModule2Widget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
+        // --- Add Knobs, Ports, and Lights ---
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(15.24, 46.063)), module, BasicModule2::PITCH_PARAM));
-
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(15.24, 77.478)), module, BasicModule2::PITCH_INPUT));
-
         addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(15.24, 108.713)), module, BasicModule2::SINE_OUTPUT));
-
         addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(15.24, 30.224)), module, BasicModule2::BLINK_LIGHT));
 
-        // Add the new zoom knob with the correct coordinates from your SVG.
+        // Oscilloscope Zoom Knob
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(63.081, 89.628)), module, BasicModule2::ZOOM_PARAM));
+
+        // New Waveform Type Knob
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(64.15, 39.114)), module, BasicModule2::WAVETYPE_PARAM));
 
         // Add oscilloscope display
         if (module) {
             SimpleScope* scope = new SimpleScope();
             scope->box.pos = mm2px(Vec(35.0, 38.0));
             scope->box.size = mm2px(Vec(50, 40));
-            // Give the scope a pointer to the module so it can read the zoom knob.
             scope->module = module;
             addChild(scope);
             module->scope = scope;

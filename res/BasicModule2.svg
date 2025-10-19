@@ -36,7 +36,7 @@
      inkscape:cx="70.205602"
      inkscape:cy="229.30463"
      inkscape:document-units="mm"
-     inkscape:current-layer="layer2"
+     inkscape:current-layer="layer1"
      showgrid="false"
      units="mm"
      inkscape:snap-bbox="true"
@@ -200,9 +200,9 @@
        inkscape:label="Title text"><tspan
          x="166.67578"
          y="194.63703"
-         id="tspan4"><tspan
+         id="tspan5"><tspan
            style="font-family:Krungthep;-inkscape-font-specification:Krungthep"
-           id="tspan3">This module suuuucks</tspan></tspan></text>
+           id="tspan1">This module suuuucks</tspan></tspan></text>
   </g>
   <g
      inkscape:groupmode="layer"
@@ -251,5 +251,12 @@
        cy="89.628197"
        r="4"
        inkscape:label="zoom" />
+    <circle
+       style="display:inline;opacity:1;vector-effect:none;fill:#ff0000;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:1;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:normal"
+       id="circle1"
+       cx="64.150322"
+       cy="39.114254"
+       r="4"
+       inkscape:label="wavetype" />
   </g>
 </svg>
