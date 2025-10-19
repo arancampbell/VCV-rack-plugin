@@ -51,9 +51,6 @@ struct BasicModule2 : Module {
         LIGHTS_LEN
     };
 
-    // This integer will hold the current waveform type, determined by the knob
-    int waveform = 0;
-
     float phase = 0.f;
     float blinkPhase = 0.f;
 
@@ -75,20 +72,6 @@ struct BasicModule2 : Module {
     }
 
     void process(const ProcessArgs& args) override {
-        // --- Waveform Selection from Knob ---
-        float waveValue = params[WAVETYPE_PARAM].getValue();
-
-        // Determine waveform based on the knob's position (0.0 to 1.0)
-        if (waveValue <= 0.25f) {
-            waveform = 0; // 0-25% is Sine
-        } else if (waveValue <= 0.5f) {
-            waveform = 3; // 26-50% is Triangle
-        } else if (waveValue <= 0.75f) {
-            waveform = 1; // 51-75% is Sawtooth
-        } else {
-            waveform = 2; // 76-100% is Square
-        }
-
         // --- Signal Generation ---
         float pitch = params[PITCH_PARAM].getValue();
         pitch += inputs[PITCH_INPUT].getVoltage();
@@ -98,23 +81,32 @@ struct BasicModule2 : Module {
         if (phase >= 1.f)
             phase -= 1.f;
 
-        float wave = 0.f;
-        switch (waveform) {
-            case 0: // Sine
-                wave = std::sin(2.f * M_PI * phase);
-                break;
-            case 1: // Sawtooth
-                wave = 2.f * phase - 1.f;
-                break;
-            case 2: // Square
-                wave = (phase < 0.5f) ? 1.f : -1.f;
-                break;
-            case 3: // Triangle
-                wave = 4.f * std::fabs(phase - 0.5f) - 1.f;
-                break;
+        // --- Waveform Morphing Logic ---
+        float waveValue = params[WAVETYPE_PARAM].getValue();
+        float finalWave = 0.f;
+
+        // 1. Generate all four pure waveforms
+        float sine = std::sin(2.f * M_PI * phase);
+        float triangle = 4.f * std::fabs(phase - 0.5f) - 1.f;
+        float saw = 2.f * phase - 1.f;
+        float square = (phase < 0.5f) ? 1.f : -1.f;
+
+        // 2. Determine which two waves to morph between
+        if (waveValue <= 0.33f) {
+            // Morph between Sine (0) and Triangle (0.33)
+            float t = rack::math::rescale(waveValue, 0.f, 0.33f, 0.f, 1.f);
+            finalWave = (1.f - t) * sine + t * triangle;
+        } else if (waveValue <= 0.67f) {
+            // Morph between Triangle (0.33) and Sawtooth (0.67)
+            float t = rack::math::rescale(waveValue, 0.33f, 0.67f, 0.f, 1.f);
+            finalWave = (1.f - t) * triangle + t * saw;
+        } else {
+            // Morph between Sawtooth (0.67) and Square (1.0)
+            float t = rack::math::rescale(waveValue, 0.67f, 1.f, 0.f, 1.f);
+            finalWave = (1.f - t) * saw + t * square;
         }
 
-        float output = 5.f * wave;
+        float output = 5.f * finalWave;
         outputs[SINE_OUTPUT].setVoltage(output);
 
         // Send data to oscilloscope (downsampled to control scroll speed)
