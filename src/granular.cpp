@@ -22,9 +22,17 @@ struct WaveformDisplay : rack::TransparentWidget {
     Granular* module = nullptr;
     std::shared_ptr<rack::Font> font;
 
+    // Cache for high-fidelity waveform drawing
+    std::vector<std::pair<float, float>> displayCache;
+    float cacheBoxWidth = 0.f;
+    size_t cacheBufferSize = 0; // Use to detect when a new file is loaded
+
     WaveformDisplay() {
         font = APP->window->loadFont(rack::asset::system("res/fonts/ShareTechMono-Regular.ttf"));
     }
+
+    // DECLARE the function here, move the definition after Granular
+    void regenerateCache();
 
     // DECLARE the draw function here
     void draw(const DrawArgs& args) override;
@@ -74,6 +82,8 @@ struct Granular : Module {
         POSITION_PARAM, // Renamed for clarity
         GRAIN_SIZE_PARAM, // Renamed for clarity
         GRAIN_DENSITY_PARAM, // Renamed for clarity
+        ENV_SHAPE_PARAM, // New knob for envelope shape
+        RANDOM_PARAM,    // New knob for randomization
         PARAMS_LEN
     };
     // Use the InputId enums from BasicModule2
@@ -116,6 +126,10 @@ struct Granular : Module {
         configParam(GRAIN_SIZE_PARAM, 0.01f, 1.0f, 0.1f, "Grain Size", " s"); // Adjusted range
         configParam(GRAIN_DENSITY_PARAM, 1.f, 200.f, 20.f, "Grain Density", " Hz"); // Adjusted range
 
+        // Configure new params (functionality not yet implemented)
+        configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Env. Shape");
+        configParam(RANDOM_PARAM, 0.f, 1.f, 0.f, "Random");
+
         configInput(POSITION_INPUT, "Position CV");
         configOutput(AUDIO_OUTPUT, "Audio");
 
@@ -136,6 +150,10 @@ struct Granular : Module {
         // --- Read Controls ---
         float density = params[GRAIN_DENSITY_PARAM].getValue();
         float grainSize = params[GRAIN_SIZE_PARAM].getValue();
+        // Read new knob values (but don't use them yet)
+        // float envShape = params[ENV_SHAPE_PARAM].getValue();
+        // float random = params[RANDOM_PARAM].getValue();
+
 
         // Get position from knob and CV
         grainSpawnPosition = params[POSITION_PARAM].getValue();
@@ -202,6 +220,51 @@ struct Granular : Module {
     }
 };
 
+// --- WaveformDisplay regenerateCache() Implementation ---
+// DEFINE the function here, *after* Granular is fully defined
+void WaveformDisplay::regenerateCache() {
+    if (!module || box.size.x <= 0) return;
+
+    size_t bufferSize = module->audioBuffer.size();
+    if (bufferSize == 0) {
+        displayCache.clear();
+        return;
+    }
+
+    // Resize cache to match pixel width
+    displayCache.resize(box.size.x);
+    cacheBoxWidth = box.size.x;
+    cacheBufferSize = bufferSize;
+
+    float samplesPerPixel = (float)bufferSize / box.size.x;
+
+    for (int i = 0; i < box.size.x; i++) {
+        size_t startSample = (size_t)(i * samplesPerPixel);
+        size_t endSample = (size_t)((i + 1) * samplesPerPixel);
+        if (endSample > bufferSize) endSample = bufferSize;
+
+        float minSample = 1.f;
+        float maxSample = -1.f;
+
+        if (startSample >= endSample) {
+            if (startSample < bufferSize) {
+                minSample = maxSample = module->audioBuffer[startSample];
+            } else {
+                minSample = maxSample = 0.f;
+            }
+        } else {
+            // Find the min/max values for this pixel column
+            for (size_t j = startSample; j < endSample; j++) {
+                float sample = module->audioBuffer[j];
+                if (sample < minSample) minSample = sample;
+                if (sample > maxSample) maxSample = sample;
+            }
+        }
+        displayCache[i] = {minSample, maxSample};
+    }
+}
+
+
 // --- WaveformDisplay draw() Implementation ---
 // DEFINE the draw function here, *after* Granular is fully defined
 void WaveformDisplay::draw(const DrawArgs& args) {
@@ -214,10 +277,14 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     if (!module)
         return;
 
+    // --- Check if cache needs regenerating ---
     size_t bufferSize = module->audioBuffer.size();
+    if (bufferSize != cacheBufferSize || box.size.x != cacheBoxWidth) {
+        regenerateCache();
+    }
 
-    // If buffer is empty, draw text
-    if (bufferSize == 0) {
+    // If buffer is empty (or cache is), draw text
+    if (displayCache.empty()) {
         nvgFontSize(args.vg, 14);
         nvgFontFaceId(args.vg, font->handle);
         nvgFillColor(args.vg, nvgRGBA(255, 255, 255, 100));
@@ -226,26 +293,24 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    // Draw the waveform
+    // --- Draw the cached waveform ---
     nvgBeginPath(args.vg);
     nvgStrokeColor(args.vg, nvgRGBA(0, 255, 100, 255));
-    nvgStrokeWidth(args.vg, 1.5);
+    nvgStrokeWidth(args.vg, 1.f);
 
-    for (int i = 0; i < box.size.x; i++) {
-        // Map pixel X to buffer index
-        size_t sampleIndex = (size_t)((float)i / box.size.x * bufferSize);
-        if (sampleIndex >= bufferSize) sampleIndex = bufferSize - 1; // Safety clamp
-        float sample = module->audioBuffer[sampleIndex];
+    for (int i = 0; i < (int)displayCache.size(); i++) {
+        float minSample = displayCache[i].first;
+        float maxSample = displayCache[i].second;
 
-        // Map sample value (-1 to 1) to Y position
-        float y = box.size.y - ((sample + 1.f) / 2.f) * box.size.y;
+        // Map min and max to Y coordinates
+        float y_min = box.size.y - ((minSample + 1.f) / 2.f) * box.size.y;
+        float y_max = box.size.y - ((maxSample + 1.f) / 2.f) * box.size.y;
 
-        if (i == 0)
-            nvgMoveTo(args.vg, i, y);
-        else
-            nvgLineTo(args.vg, i, y);
+        // Draw a vertical line for this pixel column
+        nvgMoveTo(args.vg, i + 0.5f, y_min); // +0.5f for sharper pixels
+        nvgLineTo(args.vg, i + 0.5f, y_max);
     }
-    nvgStroke(args.vg);
+    nvgStroke(args.vg); // Stroke all the vertical lines at once
 
     // --- Draw Playback Head (Spawn Position) ---
     float spawnX = module->grainSpawnPosition * box.size.x;
@@ -260,7 +325,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     // --- Draw individual grain heads ---
     std::vector<Grain>& activeGrains = module->grains;
 
-    nvgStrokeColor(args.vg, nvgRGBA(0, 0, 255, 100)); // Semi-transparent blue for active grains
+    nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 100)); // Semi-transparent blue for active grains
     nvgStrokeWidth(args.vg, 1.0f);
 
     for (const Grain& grain : activeGrains) {
@@ -279,6 +344,9 @@ void WaveformDisplay::draw(const DrawArgs& args) {
 
 
 struct GranularWidget : ModuleWidget {
+    // Keep a pointer to the display to invalidate its cache
+    WaveformDisplay* display = nullptr;
+
     GranularWidget(Granular* module) {
         setModule(module);
         // Use the new granular.svg file
@@ -290,7 +358,7 @@ struct GranularWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
         // Add the waveform display, placing it where the old scope was
-        WaveformDisplay* display = new WaveformDisplay();
+        display = new WaveformDisplay(); // Assign to member variable
         display->module = module;
         display->box.pos = mm2px(Vec(39, 47.0));    // Position from BasicModule2
         display->box.size = mm2px(Vec(50, 30)); // Size from BasicModule2
@@ -312,6 +380,12 @@ struct GranularWidget : ModuleWidget {
 
         // GRAIN_DENSITY_PARAM (Grain Density)
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 84.016)), module, Granular::GRAIN_DENSITY_PARAM));
+
+        // --- ADD NEW KNOBS ---
+        // NOTE: You will need to get the correct coordinates from helper.py for these.
+        // I have placed them below the other knobs as placeholders.
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.277, 105.0)), module, Granular::ENV_SHAPE_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 105.0)), module, Granular::RANDOM_PARAM));
     }
 
     // Handle file drag-and-drop
@@ -362,6 +436,11 @@ struct GranularWidget : ModuleWidget {
                 // Directly call setBuffer now that loading is done
                 granularModule->setBuffer(newBuffer, sampleRate);
                 // isLoading is set to false inside setBuffer
+
+                // --- Invalidate the display cache ---
+                if (display) {
+                    display->cacheBufferSize = 0; // Force cache regen on next draw
+                }
             }
         }
     }
