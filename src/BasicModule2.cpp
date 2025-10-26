@@ -31,10 +31,11 @@ struct SimpleScope : TransparentWidget {
 
 
 struct BasicModule2 : Module {
+    // Updated enum order to match the new helper.py output
     enum ParamId {
         PITCH_PARAM,
+        WAVETYPE_PARAM,
         ZOOM_PARAM,
-        WAVETYPE_PARAM, // Knob to select the waveform type
         PARAMS_LEN
     };
     enum InputId {
@@ -163,7 +164,9 @@ void SimpleScope::drawLayer(const DrawArgs& args, int layer) {
     int samplesToDisplay = 256; // Default value in case module isn't set.
     if (module) {
         float zoomValue = module->params[BasicModule2::ZOOM_PARAM].getValue();
-        samplesToDisplay = (int)rack::math::rescale(zoomValue, 0.f, 1.f, 2048.f, 32.f);
+        // New zoom range: 0% on new dial = 50% on old dial (1040 samples).
+        // 100% on new dial is twice as zoomed in (16 samples vs 32).
+        samplesToDisplay = (int)rack::math::rescale(zoomValue, 0.f, 1.f, 512.f, 8.f);
     }
 
     nvgBeginPath(args.vg);
@@ -199,23 +202,23 @@ struct BasicModule2Widget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-        // --- Add Knobs, Ports, and Lights ---
+        // --- Add Knobs, Ports, and Lights with updated positions ---
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(15.24, 46.063)), module, BasicModule2::PITCH_PARAM));
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(15.24, 77.478)), module, BasicModule2::PITCH_INPUT));
         addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(15.24, 108.713)), module, BasicModule2::SINE_OUTPUT));
         addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(15.24, 30.224)), module, BasicModule2::BLINK_LIGHT));
 
-        // Oscilloscope Zoom Knob
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(63.081, 89.628)), module, BasicModule2::ZOOM_PARAM));
+        // New Waveform Type Knob with updated position
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.277, 84.016)), module, BasicModule2::WAVETYPE_PARAM));
 
-        // New Waveform Type Knob
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(64.15, 39.114)), module, BasicModule2::WAVETYPE_PARAM));
+        // Oscilloscope Zoom Knob with updated position
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 84.016)), module, BasicModule2::ZOOM_PARAM));
 
         // Add oscilloscope display
         if (module) {
             SimpleScope* scope = new SimpleScope();
-            scope->box.pos = mm2px(Vec(35.0, 38.0));
-            scope->box.size = mm2px(Vec(50, 40));
+            scope->box.pos = mm2px(Vec(39, 47.0));
+            scope->box.size = mm2px(Vec(50, 30));
             scope->module = module;
             addChild(scope);
             module->scope = scope;

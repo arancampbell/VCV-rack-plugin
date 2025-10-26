@@ -8,6 +8,7 @@ void init(rack::Plugin *p) {
 	p->addModel(modelBasicModule);
 	p->addModel(modelLIMONADE);
 	p->addModel(modelBasicModule2);
+	p->addModel(modelGranular);
 }
 
 void InstantiateExpanderItem::onAction(const event::Action &e) {

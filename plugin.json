@@ -36,6 +36,12 @@
       "tags": [
         "VCO"
       ]
+    },
+    {
+      "slug": "granular",
+      "name": "granular",
+      "description": "granular synth",
+      "tags": []
     }
   ]
 }

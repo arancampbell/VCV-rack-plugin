@@ -17,6 +17,7 @@ extern Plugin *pluginInstance;
 extern Model *modelLIMONADE;
 extern Model* modelBasicModule;
 extern Model* modelBasicModule2;
+extern Model* modelGranular;
 
 struct InstantiateExpanderItem : MenuItem {
 	Module* module;
