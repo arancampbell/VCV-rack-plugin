@@ -44,17 +44,13 @@ struct Grain {
         int index1 = (int)bufferPos;
         int index2 = (index1 + 1) % bufferSize;
         float frac = bufferPos - index1;
-        float s1 = buffer[index1];
-        float s2 = buffer[index2];
+        float s1 = buffer[index1 % bufferSize]; // Ensure index1 is within bounds
+        float s2 = buffer[index2 % bufferSize]; // Ensure index2 is within bounds
         return (1.f - frac) * s1 + frac * s2;
     }
 
     // Get envelope value (using a Hann window)
     float getEnvelope() {
-        // rack::dsp::hannWindow applies a window to a buffer, it doesn't return a value at a phase.
-        // We must calculate the Hann window value manually.
-        // The formula is 0.5 * (1 - cos(2 * PI * t))
-        // where t is our 'life' variable (0.0 to 1.0)
         return 0.5f * (1.f - std::cos(2.f * M_PI * life));
     }
 
@@ -73,24 +69,24 @@ struct Grain {
 struct Granular : Module {
     // Use the ParamId enums from BasicModule2
     enum ParamId {
-        PITCH_PARAM,    // Will be "Position"
-        WAVETYPE_PARAM, // Will be "Grain Size"
-        ZOOM_PARAM,     // Will be "Grain Density"
+        POSITION_PARAM, // Renamed for clarity
+        GRAIN_SIZE_PARAM, // Renamed for clarity
+        GRAIN_DENSITY_PARAM, // Renamed for clarity
         PARAMS_LEN
     };
     // Use the InputId enums from BasicModule2
     enum InputId {
-        PITCH_INPUT,    // Will be "Position CV"
+        POSITION_INPUT,    // Renamed for clarity
         INPUTS_LEN
     };
     // Use the OutputId enums from BasicModule2
     enum OutputId {
-        SINE_OUTPUT,    // Will be "Audio"
+        AUDIO_OUTPUT,    // Renamed for clarity
         OUTPUTS_LEN
     };
     // Use the LightId enums from BasicModule2
     enum LightId {
-        BLINK_LIGHT,    // Will be "Loading" light
+        LOADING_LIGHT,    // Renamed for clarity
         LIGHTS_LEN
     };
 
@@ -101,7 +97,7 @@ struct Granular : Module {
 
     // --- Granular Engine ---
     std::vector<Grain> grains;
-    static const int MAX_GRAINS = 64;
+    static const int MAX_GRAINS = 128; // Increased max grains
     float grainSpawnTimer = 0.f;
 
     // This will be read by the WaveformDisplay to show the playhead
@@ -114,37 +110,34 @@ struct Granular : Module {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
         // Configure params using the BasicModule2 layout
-        // PITCH_PARAM is now "Position"
-        configParam(PITCH_PARAM, 0.f, 1.f, 0.5f, "Position");
-        // WAVETYPE_PARAM is now "Grain Size"
-        configParam(WAVETYPE_PARAM, 0.02f, 0.5f, 0.1f, "Grain Size", " s");
-        // ZOOM_PARAM is now "Grain Density"
-        configParam(ZOOM_PARAM, 1.f, 50.f, 10.f, "Grain Density", " Hz");
+        configParam(POSITION_PARAM, 0.f, 1.f, 0.5f, "Position");
+        configParam(GRAIN_SIZE_PARAM, 0.01f, 1.0f, 0.1f, "Grain Size", " s"); // Adjusted range
+        configParam(GRAIN_DENSITY_PARAM, 1.f, 200.f, 20.f, "Grain Density", " Hz"); // Adjusted range
 
-        configInput(PITCH_INPUT, "Position CV");
-        configOutput(SINE_OUTPUT, "Audio");
+        configInput(POSITION_INPUT, "Position CV");
+        configOutput(AUDIO_OUTPUT, "Audio");
 
         grains.reserve(MAX_GRAINS);
     }
 
     // Main audio processing function - NOW A GRANULAR ENGINE
     void process(const ProcessArgs& args) override {
-        // Use the BLINK_LIGHT as our loading light
-        lights[BLINK_LIGHT].setBrightness(isLoading);
+        // Use the LOADING_LIGHT as our loading light
+        lights[LOADING_LIGHT].setBrightness(isLoading);
 
         // If loading or buffer is empty, output silence
         if (isLoading || audioBuffer.empty()) {
-            outputs[SINE_OUTPUT].setVoltage(0.f);
+            outputs[AUDIO_OUTPUT].setVoltage(0.f);
             return;
         }
 
         // --- Read Controls ---
-        float density = params[ZOOM_PARAM].getValue();
-        float grainSize = params[WAVETYPE_PARAM].getValue();
+        float density = params[GRAIN_DENSITY_PARAM].getValue();
+        float grainSize = params[GRAIN_SIZE_PARAM].getValue();
 
         // Get position from knob and CV
-        grainSpawnPosition = params[PITCH_PARAM].getValue();
-        grainSpawnPosition += inputs[PITCH_INPUT].getVoltage() * 0.1f; // 1V/Oct = 10% change
+        grainSpawnPosition = params[POSITION_PARAM].getValue();
+        grainSpawnPosition += inputs[POSITION_INPUT].getVoltage() * 0.1f; // 1V/Oct = 10% change
         grainSpawnPosition = rack::math::clamp(grainSpawnPosition, 0.f, 1.f);
 
         // --- Grain Spawning ---
@@ -195,7 +188,7 @@ struct Granular : Module {
         }
 
         // Output the sample (scaled to +/- 5V)
-        outputs[SINE_OUTPUT].setVoltage(5.f * out);
+        outputs[AUDIO_OUTPUT].setVoltage(5.f * out);
     }
 
 
@@ -253,16 +246,32 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     }
     nvgStroke(args.vg);
 
-    // --- Draw Playback Head ---
-    // Now tracks the grain *spawn position*
-    float x = module->grainSpawnPosition * box.size.x;
+    // --- Draw Playback Head (Spawn Position) ---
+    float spawnX = module->grainSpawnPosition * box.size.x;
 
     nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(255, 0, 0, 200)); // Bright red
+    nvgStrokeColor(args.vg, nvgRGBA(255, 0, 0, 200)); // Bright red for spawn position
     nvgStrokeWidth(args.vg, 2.0f);
-    nvgMoveTo(args.vg, x, 0);
-    nvgLineTo(args.vg, x, box.size.y);
+    nvgMoveTo(args.vg, spawnX, 0);
+    nvgLineTo(args.vg, spawnX, box.size.y);
     nvgStroke(args.vg);
+
+    // --- Draw individual grain heads ---
+    // Iterate through a copy of grains to avoid modification during draw (might cause glitches)
+    // For a simple visual, directly iterating is often fine, but for robustness a mutex or copy would be better.
+    // For now, assuming granular.grains is safe to read.
+    std::vector<Grain>& activeGrains = module->grains; // Get reference to avoid copy
+
+    nvgStrokeColor(args.vg, nvgRGBA(0, 255, 0, 100)); // Semi-transparent green for active grains
+    nvgStrokeWidth(args.vg, 1.0f);
+
+    for (const Grain& grain : activeGrains) {
+        float grainX = (float)(grain.bufferPos / bufferSize) * box.size.x;
+        nvgBeginPath(args.vg);
+        nvgMoveTo(args.vg, grainX, 0);
+        nvgLineTo(args.vg, grainX, box.size.y);
+        nvgStroke(args.vg);
+    }
 }
 
 
@@ -286,20 +295,20 @@ struct GranularWidget : ModuleWidget {
 
         // --- Add Knobs, Ports, and Lights using BasicModule2 positions ---
 
-        // PITCH_PARAM (Position)
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(15.24, 46.063)), module, Granular::PITCH_PARAM));
-        // PITCH_INPUT (Position CV)
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(15.24, 77.478)), module, Granular::PITCH_INPUT));
-        // SINE_OUTPUT (Audio)
-        addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(15.24, 108.713)), module, Granular::SINE_OUTPUT));
-        // BLINK_LIGHT (Loading)
-        addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(15.24, 30.224)), module, Granular::BLINK_LIGHT));
+        // POSITION_PARAM (Position)
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(15.24, 46.063)), module, Granular::POSITION_PARAM));
+        // POSITION_INPUT (Position CV)
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(15.24, 77.478)), module, Granular::POSITION_INPUT));
+        // AUDIO_OUTPUT (Audio)
+        addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(15.24, 108.713)), module, Granular::AUDIO_OUTPUT));
+        // LOADING_LIGHT (Loading)
+        addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(15.24, 30.224)), module, Granular::LOADING_LIGHT));
 
-        // WAVETYPE_PARAM (Grain Size)
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.277, 84.016)), module, Granular::WAVETYPE_PARAM));
+        // GRAIN_SIZE_PARAM (Grain Size)
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.277, 84.016)), module, Granular::GRAIN_SIZE_PARAM));
 
-        // ZOOM_PARAM (Grain Density)
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 84.016)), module, Granular::ZOOM_PARAM));
+        // GRAIN_DENSITY_PARAM (Grain Density)
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 84.016)), module, Granular::GRAIN_DENSITY_PARAM));
     }
 
     // Handle file drag-and-drop
