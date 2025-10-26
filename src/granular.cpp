@@ -260,7 +260,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     // --- Draw individual grain heads ---
     std::vector<Grain>& activeGrains = module->grains;
 
-    nvgStrokeColor(args.vg, nvgRGBA(0, 255, 0, 100)); // Semi-transparent green for active grains
+    nvgStrokeColor(args.vg, nvgRGBA(0, 0, 255, 100)); // Semi-transparent blue for active grains
     nvgStrokeWidth(args.vg, 1.0f);
 
     for (const Grain& grain : activeGrains) {
