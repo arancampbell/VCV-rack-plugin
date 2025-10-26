@@ -2,7 +2,7 @@
 #include <vector>
 #include <string>
 #include <atomic>
-#include <cmath> // Include for std::cos and M_PI
+#include <cmath> // Include for std::cos, M_PI, and std::fmod
 
 // Include for windowing function
 #include "dsp/window.hpp"
@@ -42,6 +42,7 @@ struct Grain {
         if (buffer.empty()) return 0.f;
         size_t bufferSize = buffer.size();
         int index1 = (int)bufferPos;
+        // Use modulo to wrap the read position
         int index2 = (index1 + 1) % bufferSize;
         float frac = bufferPos - index1;
         float s1 = buffer[index1 % bufferSize]; // Ensure index1 is within bounds
@@ -51,6 +52,7 @@ struct Grain {
 
     // Get envelope value (using a Hann window)
     float getEnvelope() {
+        // The formula for a Hann window value is 0.5 * (1 - cos(2 * PI * t))
         return 0.5f * (1.f - std::cos(2.f * M_PI * life));
     }
 
@@ -149,7 +151,6 @@ struct Granular : Module {
                 Grain g;
 
                 // Spawn at the current position
-                // TODO: Add jitter to this position
                 g.bufferPos = grainSpawnPosition * (audioBuffer.size() - 1);
 
                 g.life = 0.f;
@@ -213,8 +214,10 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     if (!module)
         return;
 
+    size_t bufferSize = module->audioBuffer.size();
+
     // If buffer is empty, draw text
-    if (module->audioBuffer.empty()) {
+    if (bufferSize == 0) {
         nvgFontSize(args.vg, 14);
         nvgFontFaceId(args.vg, font->handle);
         nvgFillColor(args.vg, nvgRGBA(255, 255, 255, 100));
@@ -222,8 +225,6 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgText(args.vg, box.size.x / 2, box.size.y / 2, "Drop .WAV file here", NULL);
         return;
     }
-
-    size_t bufferSize = module->audioBuffer.size();
 
     // Draw the waveform
     nvgBeginPath(args.vg);
@@ -257,16 +258,18 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgStroke(args.vg);
 
     // --- Draw individual grain heads ---
-    // Iterate through a copy of grains to avoid modification during draw (might cause glitches)
-    // For a simple visual, directly iterating is often fine, but for robustness a mutex or copy would be better.
-    // For now, assuming granular.grains is safe to read.
-    std::vector<Grain>& activeGrains = module->grains; // Get reference to avoid copy
+    std::vector<Grain>& activeGrains = module->grains;
 
     nvgStrokeColor(args.vg, nvgRGBA(0, 255, 0, 100)); // Semi-transparent green for active grains
     nvgStrokeWidth(args.vg, 1.0f);
 
     for (const Grain& grain : activeGrains) {
-        float grainX = (float)(grain.bufferPos / bufferSize) * box.size.x;
+        // --- FIX: Use fmod to wrap the grain's visual position ---
+        // This ensures grains that wrap around the buffer are drawn at the beginning
+        double wrappedBufferPos = std::fmod(grain.bufferPos, (double)bufferSize);
+        float grainX = (float)(wrappedBufferPos / bufferSize) * box.size.x;
+        // --- END FIX ---
+
         nvgBeginPath(args.vg);
         nvgMoveTo(args.vg, grainX, 0);
         nvgLineTo(args.vg, grainX, box.size.y);
@@ -278,8 +281,8 @@ void WaveformDisplay::draw(const DrawArgs& args) {
 struct GranularWidget : ModuleWidget {
     GranularWidget(Granular* module) {
         setModule(module);
-        // Set panel to BasicModule2.svg
-        setPanel(createPanel(asset::plugin(pluginInstance, "res/BasicModule2.svg")));
+        // Use the new granular.svg file
+        setPanel(createPanel(asset::plugin(pluginInstance, "res/granular.svg")));
 
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
