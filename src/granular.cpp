@@ -39,6 +39,7 @@ struct Grain {
     double bufferPos;     // Current playback position in the audioBuffer
     float life;           // Current position in the envelope (0.0 to 1.0)
     float lifeIncrement;  // How much to advance life per sample
+    double playbackSpeedRatio; // <-- ADDED
 
     // Simple linear interpolation
     float getSample(const std::vector<float>& buffer) {
@@ -79,7 +80,7 @@ struct Grain {
 
     // Advance the grain
     void advance() {
-        bufferPos += 1.0; // Grains play at 1x speed for now
+        bufferPos += playbackSpeedRatio; // <-- MODIFIED
         life += lifeIncrement;
     }
 
@@ -164,7 +165,7 @@ struct Granular : Module {
         float grainSize = params[GRAIN_SIZE_PARAM].getValue();
         // Read new knob values
         float envShape = params[ENV_SHAPE_PARAM].getValue();
-        // float random = params[RANDOM_PARAM].getValue();
+        float random = params[RANDOM_PARAM].getValue(); // <-- MODIFIED
 
 
         // Get position from knob and CV
@@ -182,6 +183,15 @@ struct Granular : Module {
 
                 // Spawn at the current position
                 g.bufferPos = grainSpawnPosition * (audioBuffer.size() - 1);
+
+                // --- Pitch Randomization ---
+                // Map knob (0.0-1.0) to max semitone range (0-12)
+                float maxSemitoneRange = random * 12.f;
+                // Get random value in [-maxSemitoneRange, +maxSemitoneRange]
+                float randomSemitones = (rack::random::uniform() * 2.f - 1.f) * maxSemitoneRange;
+                // Convert semitones to playback speed ratio: 2^(semitones/12)
+                g.playbackSpeedRatio = std::pow(2.f, randomSemitones / 12.f);
+                // --- End Pitch Randomization ---
 
                 g.life = 0.f;
                 float grainSizeInSamples = grainSize * fileSampleRate;
