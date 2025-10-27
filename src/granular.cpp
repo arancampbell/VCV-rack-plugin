@@ -73,26 +73,26 @@ struct Grain {
 struct Granular : Module {
     // Use the ParamId enums
     enum ParamId {
-        POSITION_PARAM, // Renamed for clarity
-        GRAIN_SIZE_PARAM, // Renamed for clarity
-        GRAIN_DENSITY_PARAM, // Renamed for clarity
-        ENV_SHAPE_PARAM, // New knob for envelope shape
-        RANDOM_PARAM,    // New knob for randomization
+        POSITION_PARAM,
+        GRAIN_SIZE_PARAM,
+        GRAIN_DENSITY_PARAM,
+        ENV_SHAPE_PARAM,
+        RANDOM_PARAM,
         PARAMS_LEN
     };
     // Use the InputId enums
     enum InputId {
-        POSITION_INPUT,    // Renamed for clarity
+        POSITION_INPUT,
         INPUTS_LEN
     };
     // Use the OutputId enums
     enum OutputId {
-        AUDIO_OUTPUT,    // Renamed for clarity
+        AUDIO_OUTPUT,
         OUTPUTS_LEN
     };
     // Use the LightId enums
     enum LightId {
-        LOADING_LIGHT,    // Renamed for clarity
+        LOADING_LIGHT,
         LIGHTS_LEN
     };
 
@@ -115,10 +115,10 @@ struct Granular : Module {
     Granular() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-        // Configure params using the BasicModule2 layout
-        configParam(POSITION_PARAM, 0.f, 1.f, 0.5f, "Position");
-        configParam(GRAIN_SIZE_PARAM, 0.01f, 1.0f, 0.1f, "Grain Size", " s"); // Adjusted range
-        configParam(GRAIN_DENSITY_PARAM, 1.f, 200.f, 20.f, "Grain Density", " Hz"); // Adjusted range
+        // Configure params using original enums
+        configParam(POSITION_PARAM, 0.f, 1.f, 0.f, "Position");
+        configParam(GRAIN_SIZE_PARAM, 0.01f, 2.0f, 0.1f, "Grain Size", " s"); // Adjusted range
+        configParam(GRAIN_DENSITY_PARAM, 1.f, 100.f, 0.f, "Grain Density", " Hz"); // Adjusted range
 
         // Configure new params (functionality not yet implemented)
         configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Env. Shape");
@@ -231,7 +231,7 @@ void WaveformDisplay::regenerateCache() {
 
     float samplesPerPixel = (float)bufferSize / box.size.x;
 
-    for (int i = 0; i < box.size.x; i++) {
+    for (int i = 0; i < (int)box.size.x; i++) {
         size_t startSample = (size_t)(i * samplesPerPixel);
         size_t endSample = (size_t)((i + 1) * samplesPerPixel);
         if (endSample > bufferSize) endSample = bufferSize;
@@ -264,7 +264,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     // Draw background
     nvgBeginPath(args.vg);
     nvgRect(args.vg, 0, 0, box.size.x, box.size.y);
-    nvgFillColor(args.vg, nvgRGBA(20, 20, 20, 200));
+    nvgFillColor(args.vg, nvgRGBA(20, 20, 20, 255));
     nvgFill(args.vg);
 
     if (!module)
@@ -350,29 +350,31 @@ struct GranularWidget : ModuleWidget {
         // waveform display
         display = new WaveformDisplay(); // Assign to member variable
         display->module = module;
-        display->box.pos = mm2px(Vec(39, 47.0));
-        display->box.size = mm2px(Vec(50, 30));
+        display->box.pos = mm2px(Vec(20.0, 30.0));
+        display->box.size = mm2px(Vec(140, 40));
         addChild(display);
 
-        // POSITION_PARAM (Position)
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(15.24, 46.063)), module, Granular::POSITION_PARAM));
-        // POSITION_INPUT (Position CV)
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(15.24, 77.478)), module, Granular::POSITION_INPUT));
-        // AUDIO_OUTPUT (Audio)
-        addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(15.24, 108.713)), module, Granular::AUDIO_OUTPUT));
-        // LOADING_LIGHT (Loading)
-        addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(15.24, 30.224)), module, Granular::LOADING_LIGHT));
+        // --- Use new helper.py positions with original ParamIds ---
 
-        // GRAIN_SIZE_PARAM (Grain Size)
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.277, 84.016)), module, Granular::GRAIN_SIZE_PARAM));
+        // RANDOM_PARAM (Random) - New Pos
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(184.573, 46.063)), module, Granular::RANDOM_PARAM));
+        // GRAIN_SIZE_PARAM (Grain Size) - New Pos
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.0, 84.0)), module, Granular::GRAIN_SIZE_PARAM));
+        // GRAIN_DENSITY_PARAM (Grain Density) - New Pos
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(84.0, 84.0)), module, Granular::GRAIN_DENSITY_PARAM));
+        // ENV_SHAPE_PARAM (Env Shape) - New Pos
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(114.0, 84.0)), module, Granular::ENV_SHAPE_PARAM));
+        // POSITION_PARAM (Position) - New Pos
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(144.0, 84.0)), module, Granular::POSITION_PARAM));
 
-        // GRAIN_DENSITY_PARAM (Grain Density)
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 84.016)), module, Granular::GRAIN_DENSITY_PARAM));
+        // POSITION_INPUT (Position CV) - New Pos
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(184.573, 77.478)), module, Granular::POSITION_INPUT));
 
-        // --- ADD NEW KNOBS ---
-        // NOTE: still gotta get correct coordinates from helper.py for these.
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.277, 105.0)), module, Granular::ENV_SHAPE_PARAM));
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 105.0)), module, Granular::RANDOM_PARAM));
+        // AUDIO_OUTPUT (Audio) - New Pos
+        addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(184.573, 108.713)), module, Granular::AUDIO_OUTPUT));
+
+        // LOADING_LIGHT (Loading) - New Pos
+        addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(184.573, 30.224)), module, Granular::LOADING_LIGHT));
     }
 
     // Handle file drag-and-drop
