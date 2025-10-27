@@ -53,10 +53,29 @@ struct Grain {
         return (1.f - frac) * s1 + frac * s2;
     }
 
-    // Get envelope value using a Hann window: 0.5 * (1 - cos(2 * PI * t))
-    float getEnvelope() {
-        return 0.5f * (1.f - std::cos(2.f * M_PI * life));
+    // Get envelope value, interpolating between square, triangle, and sine
+    float getEnvelope(float envShape) {
+        // Shape 0 (Square): 1.0
+        float shape_square = 1.f;
+
+        // Shape 0.5 (Triangle): 0 -> 1 -> 0
+        // Calculated as 1.0 - |(life - 0.5) * 2.0|
+        float shape_triangle = 1.f - (std::abs(life - 0.5f) * 2.f);
+
+        // Shape 1 (Sine/Hann): 0.5 * (1 - cos(2 * PI * life))
+        float shape_sine = 0.5f * (1.f - std::cos(2.f * M_PI * life));
+
+        if (envShape <= 0.5f) {
+            // Interpolate between Square (0) and Triangle (0.5)
+            float t = envShape * 2.f; // remap 0.0->0.5 to 0.0->1.0
+            return (1.f - t) * shape_square + t * shape_triangle;
+        } else {
+            // Interpolate between Triangle (0.5) and Sine (1.0)
+            float t = (envShape - 0.5f) * 2.f; // remap 0.5->1.0 to 0.0->1.0
+            return (1.f - t) * shape_triangle + t * shape_sine;
+        }
     }
+
 
     // Advance the grain
     void advance() {
@@ -143,8 +162,8 @@ struct Granular : Module {
         // --- Read Controls ---
         float density = params[GRAIN_DENSITY_PARAM].getValue();
         float grainSize = params[GRAIN_SIZE_PARAM].getValue();
-        // Read new knob values (don't use them yet)
-        // float envShape = params[ENV_SHAPE_PARAM].getValue();
+        // Read new knob values
+        float envShape = params[ENV_SHAPE_PARAM].getValue();
         // float random = params[RANDOM_PARAM].getValue();
 
 
@@ -180,7 +199,7 @@ struct Granular : Module {
             Grain& g = grains[i];
 
             float sample = g.getSample(audioBuffer);
-            float env = g.getEnvelope();
+            float env = g.getEnvelope(envShape); // Pass the knob value here
 
             out += sample * env;
 
@@ -351,6 +370,7 @@ struct GranularWidget : ModuleWidget {
         display = new WaveformDisplay(); // Assign to member variable
         display->module = module;
         display->box.pos = mm2px(Vec(20.0, 30.0));
+        // Guessing a size based on new layout.
         display->box.size = mm2px(Vec(140, 40));
         addChild(display);
 
@@ -436,4 +456,3 @@ struct GranularWidget : ModuleWidget {
 
 
 Model* modelGranular = createModel<Granular, GranularWidget>("granular");
-
