@@ -2,16 +2,11 @@
 #include <vector>
 #include <string>
 #include <atomic>
-#include <cmath> // Include for std::cos, M_PI, and std::fmod
+#include <cmath>
 
 // Include for windowing function
 #include "dsp/window.hpp"
-
-// --- dr_wav ---
-// Include the dr_wav *header* only.
-// The IMPLEMENTATION is defined in another file (like waves.cpp).
 #include "dr_wav.h"
-// --- /dr_wav ---
 
 
 // Forward-declare the module
@@ -25,7 +20,7 @@ struct WaveformDisplay : rack::TransparentWidget {
     // Cache for high-fidelity waveform drawing
     std::vector<std::pair<float, float>> displayCache;
     float cacheBoxWidth = 0.f;
-    size_t cacheBufferSize = 0; // Use to detect when a new file is loaded
+    size_t cacheBufferSize = 0; // Detect when a new file is loaded
 
     WaveformDisplay() {
         font = APP->window->loadFont(rack::asset::system("res/fonts/ShareTechMono-Regular.ttf"));
@@ -58,9 +53,8 @@ struct Grain {
         return (1.f - frac) * s1 + frac * s2;
     }
 
-    // Get envelope value (using a Hann window)
+    // Get envelope value using a Hann window: 0.5 * (1 - cos(2 * PI * t))
     float getEnvelope() {
-        // The formula for a Hann window value is 0.5 * (1 - cos(2 * PI * t))
         return 0.5f * (1.f - std::cos(2.f * M_PI * life));
     }
 
@@ -77,7 +71,7 @@ struct Grain {
 
 
 struct Granular : Module {
-    // Use the ParamId enums from BasicModule2
+    // Use the ParamId enums
     enum ParamId {
         POSITION_PARAM, // Renamed for clarity
         GRAIN_SIZE_PARAM, // Renamed for clarity
@@ -86,17 +80,17 @@ struct Granular : Module {
         RANDOM_PARAM,    // New knob for randomization
         PARAMS_LEN
     };
-    // Use the InputId enums from BasicModule2
+    // Use the InputId enums
     enum InputId {
         POSITION_INPUT,    // Renamed for clarity
         INPUTS_LEN
     };
-    // Use the OutputId enums from BasicModule2
+    // Use the OutputId enums
     enum OutputId {
         AUDIO_OUTPUT,    // Renamed for clarity
         OUTPUTS_LEN
     };
-    // Use the LightId enums from BasicModule2
+    // Use the LightId enums
     enum LightId {
         LOADING_LIGHT,    // Renamed for clarity
         LIGHTS_LEN
@@ -136,12 +130,11 @@ struct Granular : Module {
         grains.reserve(MAX_GRAINS);
     }
 
-    // Main audio processing function - NOW A GRANULAR ENGINE
+    // MAIN AUDIO PROCESSING (AKA THE AC3 GRANULAR ENGINE)
     void process(const ProcessArgs& args) override {
-        // Use the LOADING_LIGHT as our loading light
         lights[LOADING_LIGHT].setBrightness(isLoading);
 
-        // If loading or buffer is empty, output silence
+        // output silence if loading or buffer is empty
         if (isLoading || audioBuffer.empty()) {
             outputs[AUDIO_OUTPUT].setVoltage(0.f);
             return;
@@ -150,7 +143,7 @@ struct Granular : Module {
         // --- Read Controls ---
         float density = params[GRAIN_DENSITY_PARAM].getValue();
         float grainSize = params[GRAIN_SIZE_PARAM].getValue();
-        // Read new knob values (but don't use them yet)
+        // Read new knob values (don't use them yet)
         // float envShape = params[ENV_SHAPE_PARAM].getValue();
         // float random = params[RANDOM_PARAM].getValue();
 
@@ -201,7 +194,7 @@ struct Granular : Module {
             }
         }
 
-        // Mixdown: divide by sqrt of grain count to avoid harsh clipping
+        // Mixdown: divide by sqrt of grain count to avoid harsh clipping - DO NOT REMOVE THIS OR ELSE
         if (!grains.empty()) {
             out /= std::sqrt(grains.size());
         }
@@ -265,8 +258,8 @@ void WaveformDisplay::regenerateCache() {
 }
 
 
-// --- WaveformDisplay draw() Implementation ---
-// DEFINE the draw function here, *after* Granular is fully defined
+// --- WaveformDisplay drawing ---
+// DEFINE the draw function here, after Granular is fully defined
 void WaveformDisplay::draw(const DrawArgs& args) {
     // Draw background
     nvgBeginPath(args.vg);
@@ -293,7 +286,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    // --- Draw the cached waveform ---
+    // --- Draw the WAV's waveform ---
     nvgBeginPath(args.vg);
     nvgStrokeColor(args.vg, nvgRGBA(0, 255, 100, 255));
     nvgStrokeWidth(args.vg, 1.f);
@@ -302,21 +295,21 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         float minSample = displayCache[i].first;
         float maxSample = displayCache[i].second;
 
-        // Map min and max to Y coordinates
+        // Map min and max to Y coordinates of the sample
         float y_min = box.size.y - ((minSample + 1.f) / 2.f) * box.size.y;
         float y_max = box.size.y - ((maxSample + 1.f) / 2.f) * box.size.y;
 
-        // Draw a vertical line for this pixel column
+        // Draw a slice of the waveform
         nvgMoveTo(args.vg, i + 0.5f, y_min); // +0.5f for sharper pixels
         nvgLineTo(args.vg, i + 0.5f, y_max);
     }
-    nvgStroke(args.vg); // Stroke all the vertical lines at once
+    nvgStroke(args.vg); // draw all the vertical lines at once
 
-    // --- Draw Playback Head (Spawn Position) ---
+    // --- Draw Playback Head (grain start position) ---
     float spawnX = module->grainSpawnPosition * box.size.x;
 
     nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(255, 0, 0, 200)); // Bright red for spawn position
+    nvgStrokeColor(args.vg, nvgRGBA(255, 0, 0, 200));
     nvgStrokeWidth(args.vg, 2.0f);
     nvgMoveTo(args.vg, spawnX, 0);
     nvgLineTo(args.vg, spawnX, box.size.y);
@@ -325,15 +318,13 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     // --- Draw individual grain heads ---
     std::vector<Grain>& activeGrains = module->grains;
 
-    nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 100)); // Semi-transparent blue for active grains
+    nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 100)); //playback head for active grains (blue)
     nvgStrokeWidth(args.vg, 1.0f);
 
     for (const Grain& grain : activeGrains) {
-        // --- FIX: Use fmod to wrap the grain's visual position ---
-        // This ensures grains that wrap around the buffer are drawn at the beginning
+        // ensure grains that wrap around the buffer are drawn at the beginning
         double wrappedBufferPos = std::fmod(grain.bufferPos, (double)bufferSize);
         float grainX = (float)(wrappedBufferPos / bufferSize) * box.size.x;
-        // --- END FIX ---
 
         nvgBeginPath(args.vg);
         nvgMoveTo(args.vg, grainX, 0);
@@ -344,12 +335,11 @@ void WaveformDisplay::draw(const DrawArgs& args) {
 
 
 struct GranularWidget : ModuleWidget {
-    // Keep a pointer to the display to invalidate its cache
+    // Keep a pointer to the display for future invalidating of its cache
     WaveformDisplay* display = nullptr;
 
     GranularWidget(Granular* module) {
         setModule(module);
-        // Use the new granular.svg file
         setPanel(createPanel(asset::plugin(pluginInstance, "res/granular.svg")));
 
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
@@ -357,14 +347,12 @@ struct GranularWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-        // Add the waveform display, placing it where the old scope was
+        // waveform display
         display = new WaveformDisplay(); // Assign to member variable
         display->module = module;
-        display->box.pos = mm2px(Vec(39, 47.0));    // Position from BasicModule2
-        display->box.size = mm2px(Vec(50, 30)); // Size from BasicModule2
+        display->box.pos = mm2px(Vec(39, 47.0));
+        display->box.size = mm2px(Vec(50, 30));
         addChild(display);
-
-        // --- Add Knobs, Ports, and Lights using BasicModule2 positions ---
 
         // POSITION_PARAM (Position)
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(15.24, 46.063)), module, Granular::POSITION_PARAM));
@@ -382,8 +370,7 @@ struct GranularWidget : ModuleWidget {
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 84.016)), module, Granular::GRAIN_DENSITY_PARAM));
 
         // --- ADD NEW KNOBS ---
-        // NOTE: You will need to get the correct coordinates from helper.py for these.
-        // I have placed them below the other knobs as placeholders.
+        // NOTE: still gotta get correct coordinates from helper.py for these.
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.277, 105.0)), module, Granular::ENV_SHAPE_PARAM));
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(74.327, 105.0)), module, Granular::RANDOM_PARAM));
     }
@@ -398,12 +385,12 @@ struct GranularWidget : ModuleWidget {
 
         if (extension == ".wav") {
             if (module) {
-                // Cast to our module type
+                // Cast to the module type
                 Granular* granularModule = dynamic_cast<Granular*>(module);
                 if (!granularModule)
                     return;
 
-                // --- Start Loading Logic (runs on main thread) ---
+                // --- Start Loading Logic (on main thread) ---
                 granularModule->isLoading = true;
 
                 unsigned int channels;
@@ -433,9 +420,8 @@ struct GranularWidget : ModuleWidget {
                 // Free the data loaded by dr_wav
                 drwav_free(pSampleData, NULL);
 
-                // Directly call setBuffer now that loading is done
+                // Directly call setBuffer now that loading is done (isLoading is set to false inside setBuffer)
                 granularModule->setBuffer(newBuffer, sampleRate);
-                // isLoading is set to false inside setBuffer
 
                 // --- Invalidate the display cache ---
                 if (display) {
