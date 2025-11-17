@@ -40,6 +40,7 @@ struct Grain {
     float life;           // Current position in the envelope (0.0 to 1.0)
     float lifeIncrement;  // How much to advance life per sample
     double playbackSpeedRatio; // <-- ADDED
+    float finalEnvShape; // <-- ADDED: Store the randomized shape
 
     // Simple linear interpolation
     float getSample(const std::vector<float>& buffer) {
@@ -144,6 +145,22 @@ struct Granular : Module {
     // Atomic flag to signal when loading is in progress
     std::atomic<bool> isLoading{false};
 
+    // --- Helper function for randomization ---
+    /**
+     * Applies randomization to a base value.
+     * @param base_0_to_1 The base parameter value (0.0 to 1.0)
+     * @param r_knob_0_to_1 The randomization amount (0.0 to 1.0)
+     * @return A new value between 0.0 and 1.0
+     */
+    float getClampedRandomizedValue(float base_0_to_1, float r_knob_0_to_1) {
+        // r_knob at 1.0 gives max_deviation of 0.5 (i.e., +/- 50%)
+        float max_deviation = r_knob_0_to_1 * 0.5f;
+        // random_offset will be in [-max_deviation, +max_deviation]
+        float random_offset = (rack::random::uniform() * 2.f - 1.f) * max_deviation;
+        // Apply offset and clamp to valid 0.0-1.0 range
+        return rack::math::clamp(base_0_to_1 + random_offset, 0.f, 1.f);
+    }
+
     Granular() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
@@ -152,9 +169,9 @@ struct Granular : Module {
         configParam(GRAIN_SIZE_PARAM, 0.01f, 2.0f, 0.1f, "Grain Size", " s"); // Adjusted range
         configParam(GRAIN_DENSITY_PARAM, 1.f, 100.f, 0.f, "Grain Density", " Hz"); // Adjusted range
 
-        // Configure new params (functionality not yet implemented)
+        // Configure new params
         configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Env. Shape");
-        configParam(RANDOM_PARAM, 0.f, 1.f, 0.f, "Random");
+        configParam(RANDOM_PARAM, 0.f, 1.f, 0.f, "Random"); // This is for pitch
 
         // --- ADDED NEW CONFIGS ---
         configParam(R_SIZE_PARAM, 0.f, 1.f, 0.f, "Size Random");
@@ -185,11 +202,17 @@ struct Granular : Module {
         }
 
         // --- Read Controls ---
-        float density = params[GRAIN_DENSITY_PARAM].getValue();
-        float grainSize = params[GRAIN_SIZE_PARAM].getValue();
+        // Get base values
+        float density_hz_base = params[GRAIN_DENSITY_PARAM].getValue();
+        float grainSize_sec_base = params[GRAIN_SIZE_PARAM].getValue();
         // Read new knob values
-        float envShape = params[ENV_SHAPE_PARAM].getValue();
-        float random = params[RANDOM_PARAM].getValue(); // <-- MODIFIED
+        float envShape_base = params[ENV_SHAPE_PARAM].getValue(); // This is already 0.0-1.0
+        float random_pitch = params[RANDOM_PARAM].getValue(); // <-- MODIFIED
+
+        // --- NORMALIZE base values back to 0.0-1.0 for randomization ---
+        float density_base_0_to_1 = rack::math::rescale(density_hz_base, 1.f, 100.f, 0.f, 1.f);
+        float size_base_0_to_1 = rack::math::rescale(grainSize_sec_base, 0.01f, 2.0f, 0.f, 1.f);
+        // envShape_base is already 0.0-1.0, so no need to rescale.
 
 
         // Get position from knob and CV
@@ -197,28 +220,49 @@ struct Granular : Module {
         grainSpawnPosition += inputs[POSITION_INPUT].getVoltage() * 0.1f; // 1V/Oct = 10% change
         grainSpawnPosition = rack::math::clamp(grainSpawnPosition, 0.f, 1.f);
 
+        // --- Read Randomization Knobs + CV ---
+        // Clamp(knob + cv, 0.0, 1.0)
+        float r_density_knob = rack::math::clamp(params[R_DENSITY_PARAM].getValue() + inputs[R_DENSITY_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+        float r_size_knob = rack::math::clamp(params[R_SIZE_PARAM].getValue() + inputs[R_SIZE_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+        float r_envShape_knob = rack::math::clamp(params[R_ENV_SHAPE_PARAM].getValue() + inputs[R_ENV_SHAPE_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+        float r_position_knob = rack::math::clamp(params[R_POSITION_PARAM].getValue() + inputs[R_POSITION_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+
+
         // --- Grain Spawning ---
         grainSpawnTimer -= args.sampleTime;
         if (grainSpawnTimer <= 0.f) {
-            grainSpawnTimer = 1.f / density; // Reset timer
+            // Calculate randomized density
+            float density_final_0_to_1 = getClampedRandomizedValue(density_base_0_to_1, r_density_knob);
+            float density_hz = rack::math::rescale(density_final_0_to_1, 0.f, 1.f, 1.f, 100.f); // Use configParam range
+            grainSpawnTimer = 1.f / density_hz; // Reset timer
 
             if (grains.size() < MAX_GRAINS) {
                 Grain g;
 
-                // Spawn at the current position
-                g.bufferPos = grainSpawnPosition * (audioBuffer.size() - 1);
+                // --- Calculate Randomized Grain Properties ---
 
-                // --- Pitch Randomization ---
-                // Map knob (0.0-1.0) to max semitone range (0-12)
-                float maxSemitoneRange = random * 12.f;
+                // 1. Position
+                float position_final = getClampedRandomizedValue(grainSpawnPosition, r_position_knob);
+                g.bufferPos = position_final * (audioBuffer.size() - 1);
+
+                // 2. Pitch (from RANDOM_PARAM)
+                float maxSemitoneRange = random_pitch * 12.f;
                 // Get random value in [-maxSemitoneRange, +maxSemitoneRange]
                 float randomSemitones = (rack::random::uniform() * 2.f - 1.f) * maxSemitoneRange;
                 // Convert semitones to playback speed ratio: 2^(semitones/12)
                 g.playbackSpeedRatio = std::pow(2.f, randomSemitones / 12.f);
                 // --- End Pitch Randomization ---
 
+                // 3. Size
+                float size_final_0_to_1 = getClampedRandomizedValue(size_base_0_to_1, r_size_knob);
+                float grainSize_sec = rack::math::rescale(size_final_0_to_1, 0.f, 1.f, 0.01f, 2.0f); // Use configParam range
+
+                // 4. Env Shape
+                g.finalEnvShape = getClampedRandomizedValue(envShape_base, r_envShape_knob);
+                // --- End Randomized Properties ---
+
                 g.life = 0.f;
-                float grainSizeInSamples = grainSize * fileSampleRate;
+                float grainSizeInSamples = grainSize_sec * fileSampleRate;
                 // Ensure grainSizeInSamples is at least 1 to avoid division by zero
                 if (grainSizeInSamples < 1.f) grainSizeInSamples = 1.f;
                 g.lifeIncrement = 1.f / grainSizeInSamples;
@@ -233,7 +277,7 @@ struct Granular : Module {
             Grain& g = grains[i];
 
             float sample = g.getSample(audioBuffer);
-            float env = g.getEnvelope(envShape); // Pass the knob value here
+            float env = g.getEnvelope(g.finalEnvShape); // Pass the randomized shape
 
             out += sample * env;
 
@@ -393,6 +437,7 @@ struct GranularWidget : ModuleWidget {
 
     GranularWidget(Granular* module) {
         setModule(module);
+        // Use the new granular.svg file
         setPanel(createPanel(asset::plugin(pluginInstance, "res/granular.svg")));
 
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
