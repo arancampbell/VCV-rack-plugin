@@ -98,11 +98,23 @@ struct Granular : Module {
         GRAIN_DENSITY_PARAM,
         ENV_SHAPE_PARAM,
         RANDOM_PARAM,
+        // --- ADDED NEW PARAMS ---
+        R_SIZE_PARAM,
+        R_DENSITY_PARAM,
+        R_ENV_SHAPE_PARAM,
+        R_POSITION_PARAM,
+        // --- END NEW PARAMS ---
         PARAMS_LEN
     };
     // Use the InputId enums
     enum InputId {
         POSITION_INPUT,
+        // --- ADDED NEW INPUTS ---
+        R_SIZE_INPUT,
+        R_DENSITY_INPUT,
+        R_ENV_SHAPE_INPUT,
+        R_POSITION_INPUT,
+        // --- END NEW INPUTS ---
         INPUTS_LEN
     };
     // Use the OutputId enums
@@ -144,7 +156,19 @@ struct Granular : Module {
         configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Env. Shape");
         configParam(RANDOM_PARAM, 0.f, 1.f, 0.f, "Random");
 
+        // --- ADDED NEW CONFIGS ---
+        configParam(R_SIZE_PARAM, 0.f, 1.f, 0.f, "Size Random");
+        configParam(R_DENSITY_PARAM, 0.f, 1.f, 0.f, "Density Random");
+        configParam(R_ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Shape Random");
+        configParam(R_POSITION_PARAM, 0.f, 1.f, 0.f, "Position Random");
+
         configInput(POSITION_INPUT, "Position CV");
+        configInput(R_SIZE_INPUT, "Size CV");
+        configInput(R_DENSITY_INPUT, "Density CV");
+        configInput(R_ENV_SHAPE_INPUT, "Shape CV");
+        configInput(R_POSITION_INPUT, "Pos. Random CV");
+        // --- END NEW CONFIGS ---
+
         configOutput(AUDIO_OUTPUT, "Audio");
 
         grains.reserve(MAX_GRAINS);
@@ -376,12 +400,12 @@ struct GranularWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-        // waveform display
+        // waveform display - Use new position from helper.py
         display = new WaveformDisplay(); // Assign to member variable
         display->module = module;
         display->box.pos = mm2px(Vec(20.0, 30.0));
         // Guessing a size based on new layout.
-        display->box.size = mm2px(Vec(140, 40));
+        display->box.size = mm2px(Vec(150, 45)); // Adjusted size to fit
         addChild(display);
 
         // --- Use new helper.py positions with original ParamIds ---
@@ -389,16 +413,30 @@ struct GranularWidget : ModuleWidget {
         // RANDOM_PARAM (Random) - New Pos
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(184.573, 46.063)), module, Granular::RANDOM_PARAM));
         // GRAIN_SIZE_PARAM (Grain Size) - New Pos
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.0, 84.0)), module, Granular::GRAIN_SIZE_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.0, 81.354)), module, Granular::GRAIN_SIZE_PARAM));
         // GRAIN_DENSITY_PARAM (Grain Density) - New Pos
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(84.0, 84.0)), module, Granular::GRAIN_DENSITY_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(84.0, 81.354)), module, Granular::GRAIN_DENSITY_PARAM));
         // ENV_SHAPE_PARAM (Env Shape) - New Pos
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(114.0, 84.0)), module, Granular::ENV_SHAPE_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(114.0, 81.354)), module, Granular::ENV_SHAPE_PARAM));
         // POSITION_PARAM (Position) - New Pos
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(144.0, 84.0)), module, Granular::POSITION_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(144.0, 81.354)), module, Granular::POSITION_PARAM));
+
+        // --- ADDED NEW KNOBS (R_..._PARAM) ---
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(53.965, 100.964)), module, Granular::R_SIZE_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(83.965, 100.964)), module, Granular::R_DENSITY_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(113.965, 100.964)), module, Granular::R_ENV_SHAPE_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(143.965, 100.964)), module, Granular::R_POSITION_PARAM));
+        // --- END NEW KNOBS ---
 
         // POSITION_INPUT (Position CV) - New Pos
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(184.573, 77.478)), module, Granular::POSITION_INPUT));
+
+        // --- ADDED NEW INPUTS (R_..._INPUT) ---
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(54.192, 113.822)), module, Granular::R_SIZE_INPUT));
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(84.192, 113.822)), module, Granular::R_DENSITY_INPUT));
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(114.192, 113.822)), module, Granular::R_ENV_SHAPE_INPUT));
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(144.192, 113.822)), module, Granular::R_POSITION_INPUT));
+        // --- END NEW INPUTS ---
 
         // AUDIO_OUTPUT (Audio) - New Pos
         addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(184.573, 108.713)), module, Granular::AUDIO_OUTPUT));
