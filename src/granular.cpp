@@ -22,11 +22,6 @@ struct WaveformDisplay : rack::TransparentWidget {
     float cacheBoxWidth = 0.f;
     size_t cacheBufferSize = 0; // Detect when a new file is loaded
 
-    // --- ADDED for dragging loop points ---
-    enum DragTarget { DRAG_NONE, DRAG_START, DRAG_END };
-    DragTarget dragging = DRAG_NONE;
-    // --- END ADDED ---
-
     WaveformDisplay() {
         font = APP->window->loadFont(rack::asset::system("res/fonts/ShareTechMono-Regular.ttf"));
     }
@@ -37,12 +32,19 @@ struct WaveformDisplay : rack::TransparentWidget {
     // DECLARE the draw function here
     void draw(const DrawArgs& args) override;
 
-    // --- FIXED Event Handlers for dragging (declarations only) ---
-    void onButton(const event::Button& e) override;
-    // onDragStart is no longer needed
-    void onHover(const event::Hover& e) override; // Use onHover
-    void onDragEnd(const event::DragEnd& e) override;
-    // --- END FIXED Event Handlers ---
+    // --- INTERACTION HANDLERS (Added) ---
+
+    // Helper to update param based on mouse X
+    void setPositionFromMouse(Vec pos);
+
+    // Handle clicks (Jump to position)
+    void onButton(const ButtonEvent& e) override;
+
+    // Handle Drag Start
+    void onDragStart(const DragStartEvent& e) override;
+
+    // Handle Dragging (Scrubbing)
+    void onDragMove(const DragMoveEvent& e) override;
 };
 
 // --- Grain Struct ---
@@ -53,12 +55,6 @@ struct Grain {
     float lifeIncrement;  // How much to advance life per sample
     double playbackSpeedRatio; // <-- ADDED
     float finalEnvShape; // <-- ADDED: Store the randomized shape
-
-    // --- ADDED Loop Points ---
-    double startSample;
-    double endSample;
-    double loopLength;
-    // --- END ADDED ---
 
     // Simple linear interpolation
     float getSample(const std::vector<float>& buffer) {
@@ -101,15 +97,6 @@ struct Grain {
     void advance() {
         bufferPos += playbackSpeedRatio; // <-- MODIFIED
         life += lifeIncrement;
-
-        // --- ADDED Loop Logic ---
-        while (bufferPos >= endSample) {
-            bufferPos -= loopLength;
-        }
-        while (bufferPos < startSample) {
-            bufferPos += loopLength;
-        }
-        // --- END ADDED ---
     }
 
     bool isAlive() {
@@ -171,11 +158,6 @@ struct Granular : Module {
 
     // Atomic flag to signal when loading is in progress
     std::atomic<bool> isLoading{false};
-
-    // --- ADDED Loop Points ---
-    std::atomic<float> startPoint{0.f};
-    std::atomic<float> endPoint{1.f};
-    // --- END ADDED ---
 
     // --- Helper function for randomization ---
     /**
@@ -246,16 +228,11 @@ struct Granular : Module {
         float size_base_0_to_1 = rack::math::rescale(grainSize_sec_base, 0.01f, 2.0f, 0.f, 1.f);
         // envShape_base is already 0.0-1.0, so no need to rescale.
 
-        // --- ADDED: Read loop points from atomics ---
-        float start = startPoint.load(std::memory_order_relaxed);
-        float end = endPoint.load(std::memory_order_relaxed);
-        // --- END ADDED ---
 
         // Get position from knob and CV
-        float position_base = params[POSITION_PARAM].getValue(); // Get base 0-1 knob value
-        position_base += inputs[POSITION_INPUT].getVoltage() * 0.1f;
-        // Clamp spawn position *between the loop points*
-        grainSpawnPosition = rack::math::clamp(position_base, start, end);
+        grainSpawnPosition = params[POSITION_PARAM].getValue();
+        grainSpawnPosition += inputs[POSITION_INPUT].getVoltage() * 0.1f; // 1V/Oct = 10% change
+        grainSpawnPosition = rack::math::clamp(grainSpawnPosition, 0.f, 1.f);
 
         // --- Read Randomization Knobs + CV ---
         // Clamp(knob + cv, 0.0, 1.0)
@@ -279,19 +256,8 @@ struct Granular : Module {
                 // --- Calculate Randomized Grain Properties ---
 
                 // 1. Position
-                // Randomize based on the clamped spawn position
-                float position_randomized = getClampedRandomizedValue(grainSpawnPosition, r_position_knob);
-                // Clamp the *final* position within the loop points
-                float position_final = rack::math::clamp(position_randomized, start, end);
-                double bufferSize = (double)audioBuffer.size() - 1.0;
-                g.bufferPos = position_final * bufferSize;
-
-                // --- ADDED: Set loop points for the grain ---
-                g.startSample = start * bufferSize;
-                g.endSample = end * bufferSize;
-                g.loopLength = g.endSample - g.startSample;
-                if (g.loopLength < 1.0) g.loopLength = 1.0; // Avoid division by zero or negative length
-                // --- END ADDED ---
+                float position_final = getClampedRandomizedValue(grainSpawnPosition, r_position_knob);
+                g.bufferPos = position_final * (audioBuffer.size() - 1);
 
                 // 2. Pitch (from RANDOM_PARAM)
                 float maxSemitoneRange = random_pitch * 12.f;
@@ -355,15 +321,61 @@ struct Granular : Module {
         fileSampleRate = newSampleRate;
         grains.clear(); // Clear all active grains
         isLoading = false;
-        // --- ADDED: Reset loop points on new file load ---
-        startPoint.store(0.f, std::memory_order_relaxed);
-        endPoint.store(1.f, std::memory_order_relaxed);
-        // --- END ADDED ---
     }
 };
 
-// --- WaveformDisplay regenerateCache() Implementation ---
-// DEFINE the function here, *after* Granular is fully defined
+// --- WaveformDisplay Implementation ---
+
+// Helper to update param based on mouse X
+void WaveformDisplay::setPositionFromMouse(Vec pos) {
+    if (!module || box.size.x <= 0.f) return;
+
+    // Calculate 0.0 to 1.0 position based on mouse X relative to widget width
+    float newPos = pos.x / box.size.x;
+
+    // Clamp to valid range
+    newPos = rack::math::clamp(newPos, 0.f, 1.f);
+
+    // Update the actual module parameter
+    module->params[Granular::POSITION_PARAM].setValue(newPos);
+}
+
+// Handle initial click (Jump to position)
+void WaveformDisplay::onButton(const ButtonEvent& e) {
+    if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
+        // Jump to position on Press
+        if (e.action == GLFW_PRESS) {
+            setPositionFromMouse(e.pos);
+            e.consume(this); // Claim the event
+        }
+    }
+    // Call base class to maintain standard behavior if needed
+    TransparentWidget::onButton(e);
+}
+
+// Handle Drag Start
+void WaveformDisplay::onDragStart(const DragStartEvent& e) {
+    if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
+        // We must consume this to ensure we receive onDragMove events
+        e.consume(this);
+    }
+}
+
+// Handle Dragging (Scrubbing)
+void WaveformDisplay::onDragMove(const DragMoveEvent& e) {
+    if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
+        // Get the global mouse position from the scene and convert it
+        // to the local coordinate system of this widget.
+        // This ensures correct behavior even if dragging outside the widget bounds.
+        Vec localPos = APP->scene->mousePos - getAbsoluteOffset(Vec(0, 0));
+
+        setPositionFromMouse(localPos);
+        e.consume(this);
+    }
+}
+
+
+// DEFINE the regenerateCache function here, *after* Granular is fully defined
 void WaveformDisplay::regenerateCache() {
     if (!module || box.size.x <= 0) return;
 
@@ -454,19 +466,6 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     }
     nvgStroke(args.vg); // draw all the vertical lines at once
 
-    // --- ADDED: Draw shaded loop regions ---
-    float start_x = module->startPoint.load(std::memory_order_relaxed) * box.size.x;
-    float end_x = module->endPoint.load(std::memory_order_relaxed) * box.size.x;
-
-    nvgBeginPath(args.vg);
-    nvgFillColor(args.vg, nvgRGBA(0, 0, 0, 100));
-    // Darken area before start
-    nvgRect(args.vg, 0, 0, start_x, box.size.y);
-    // Darken area after end
-    nvgRect(args.vg, end_x, 0, box.size.x - end_x, box.size.y);
-    nvgFill(args.vg);
-    // --- END ADDED ---
-
     // --- Draw Playback Head (grain start position) ---
     float spawnX = module->grainSpawnPosition * box.size.x;
 
@@ -476,18 +475,6 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgMoveTo(args.vg, spawnX, 0);
     nvgLineTo(args.vg, spawnX, box.size.y);
     nvgStroke(args.vg);
-
-    // --- ADDED: Draw loop point lines ---
-    nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 150)); // Semi-transparent white
-    nvgStrokeWidth(args.vg, 2.0f);
-    nvgMoveTo(args.vg, start_x, 0);
-    nvgLineTo(args.vg, start_x, box.size.y);
-    nvgMoveTo(args.vg, end_x, 0);
-    nvgLineTo(args.vg, end_x, box.size.y);
-    nvgStroke(args.vg);
-    // --- END ADDED ---
-
 
     // --- Draw individual grain heads ---
     std::vector<Grain>& activeGrains = module->grains;
@@ -506,73 +493,6 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgStroke(args.vg);
     }
 }
-
-
-// --- FIXED: Event Handler Implementations ---
-void WaveformDisplay::onButton(const event::Button& e) {
-    if (!module) return;
-    if (e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
-        float start_x = module->startPoint.load(std::memory_order_relaxed) * box.size.x;
-        float end_x = module->endPoint.load(std::memory_order_relaxed) * box.size.x;
-
-        // Check if clicking near a line
-        if (std::abs(e.pos.x - start_x) < 5.f) {
-            dragging = DRAG_START;
-        } else if (std::abs(e.pos.x - end_x) < 5.f) {
-            dragging = DRAG_END;
-        } else {
-            dragging = DRAG_NONE;
-        }
-
-        // --- ADDED: Capture mouse if dragging starts ---
-        if (dragging != DRAG_NONE) {
-            APP->window->cursorLock();
-            e.consume(this); // This is the key to start capturing
-        }
-        // --- END ADDED ---
-    }
-}
-
-// onDragStart is removed as it's no longer needed
-
-// This function was RENAMED from onDragMove to onHover
-void WaveformDisplay::onHover(const event::Hover& e) {
-    // Only process if we are in a dragging state
-    if (dragging == DRAG_NONE) return;
-
-    // --- FIX: VCV Rack 2.0.5 API ---
-    // e.pos is now valid because onButton consumed the mouse event
-    float newPos = rack::math::clamp(e.pos.x / box.size.x, 0.f, 1.f);
-    // --- END FIX ---
-
-    float startPoint = module->startPoint.load(std::memory_order_relaxed);
-    float endPoint = module->endPoint.load(std::memory_order_relaxed);
-
-    if (dragging == DRAG_START) {
-        // Ensure start is always before end
-        if (newPos >= endPoint) {
-            newPos = endPoint - 0.001f; // small epsilon
-        }
-        if (newPos < 0.f) newPos = 0.f;
-        module->startPoint.store(newPos, std::memory_order_relaxed);
-    }
-    else if (dragging == DRAG_END) {
-        // Ensure end is always after start
-        if (newPos <= startPoint) {
-            newPos = startPoint + 0.001f; // small epsilon
-        }
-        if (newPos > 1.f) newPos = 1.f;
-        module->endPoint.store(newPos, std::memory_order_relaxed);
-    }
-}
-
-void WaveformDisplay::onDragEnd(const event::DragEnd& e) {
-    if (dragging != DRAG_NONE) {
-        APP->window->cursorUnlock();
-        dragging = DRAG_NONE;
-    }
-}
-// --- END FIXED ---
 
 
 struct GranularWidget : ModuleWidget {
