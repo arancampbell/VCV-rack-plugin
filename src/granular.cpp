@@ -134,37 +134,44 @@ struct Grain {
 
 struct Granular : Module {
     enum ParamId {
-       COMPRESSION_PARAM,
-       SIZE_PARAM,
-       DENSITY_PARAM,
-       ENV_SHAPE_PARAM,
-       POSITION_PARAM,
-       PITCH_PARAM,
-       R_SIZE_PARAM,
-       R_DENSITY_PARAM,
-       R_ENV_SHAPE_PARAM,
-       R_POSITION_PARAM,
-       R_PITCH_PARAM,
-       START_PARAM, // Internal
-       END_PARAM,   // Internal
-       PARAMS_LEN
+        COMPRESSION_PARAM,
+        SIZE_PARAM,
+        DENSITY_PARAM,
+        ENV_SHAPE_PARAM,
+        POSITION_PARAM,
+        PITCH_PARAM,
+        R_SIZE_PARAM,
+        R_DENSITY_PARAM,
+        R_ENV_SHAPE_PARAM,
+        R_POSITION_PARAM,
+        R_PITCH_PARAM,
+        // --- NEW MODULATION AMOUNT PARAMETERS ---
+        M_SIZE_PARAM,
+        M_DENSITY_PARAM,
+        M_AMOUNT_ENV_SHAPE_PARAM,
+        M_AMOUNT_POSITION_PARAM,
+        M_AMOUNT_PITCH_PARAM,
+        // ----------------------------------------
+        START_PARAM, // Internal
+        END_PARAM,   // Internal
+        PARAMS_LEN
     };
     enum InputId {
-       _1VOCT_INPUT,
-       M_SIZE_INPUT,      // Renamed from R_ to M_
-       M_DENSITY_INPUT,   // Renamed from R_ to M_
-       M_ENV_SHAPE_INPUT, // Renamed from R_ to M_
-       M_POSITION_INPUT,  // Renamed from R_ to M_
-       M_PITCH_INPUT,     // Renamed from R_ to M_
-       INPUTS_LEN
+        _1VOCT_INPUT,
+        M_SIZE_INPUT,
+        M_DENSITY_INPUT,
+        M_ENV_SHAPE_INPUT,
+        M_POSITION_INPUT,
+        M_PITCH_INPUT,
+        INPUTS_LEN
     };
     enum OutputId {
-       SINE_OUTPUT,
-       OUTPUTS_LEN
+        SINE_OUTPUT,
+        OUTPUTS_LEN
     };
     enum LightId {
-       BLINK_LIGHT,
-       LIGHTS_LEN
+        BLINK_LIGHT,
+        LIGHTS_LEN
     };
 
     // Buffer to hold the entire audio file (mono)
@@ -190,20 +197,41 @@ struct Granular : Module {
     Granular() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-        // --- Config Dials ---
+        // --- Config Dials (With updated Defaults) ---
         configParam(COMPRESSION_PARAM, 0.f, 1.f, 0.f, "Compression / Drive");
-        configParam(SIZE_PARAM, 0.01f, 2.0f, 0.1f, "Grain Size", " s");
-        configParam(DENSITY_PARAM, 1.f, 100.f, 10.f, "Grain Density", " Hz");
-        configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.5f, "Envelope Shape");
-        configParam(POSITION_PARAM, 0.f, 1.f, 0.f, "Position");
-        configParam(PITCH_PARAM, 0.f, 1.f, 0.5f, "Pitch Offset"); // Center = 0.5
 
-        // --- Config Random Dials ---
+        // Default Size: 0.5f
+        configParam(SIZE_PARAM, 0.01f, 2.0f, 0.5f, "Grain Size", " s");
+
+        // Default Density: Minimum (1.0f which maps to 0% knob position effectively)
+        configParam(DENSITY_PARAM, 1.f, 100.f, 1.f, "Grain Density", " Hz");
+
+        // Default Shape: 0.5f
+        configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.5f, "Envelope Shape");
+
+        // Default Position: 0.f
+        configParam(POSITION_PARAM, 0.f, 1.f, 0.f, "Position");
+
+        // Default Pitch: 0.5f (No pitch shift)
+        configParam(PITCH_PARAM, 0.f, 1.f, 0.5f, "Pitch Offset");
+
+        // --- Config Random Dials (Defaults kept at 0.f) ---
         configParam(R_SIZE_PARAM, 0.f, 1.f, 0.f, "Randomise Size");
         configParam(R_DENSITY_PARAM, 0.f, 1.f, 0.f, "Randomise Density");
         configParam(R_ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Randomise Shape");
         configParam(R_POSITION_PARAM, 0.f, 1.f, 0.f, "Randomise Position");
         configParam(R_PITCH_PARAM, 0.f, 1.f, 0.f, "Randomise Pitch");
+
+        // --- Config Modulation Amount Dials (Bipolar -1 to 1, Display in %) ---
+        // Range: -1.f to 1.f
+        // Default: 0.f
+        // Unit: "%"
+        // Display Offset: 0.f, Multiplier: 100.f (So 1.0 displays as 100%)
+        configParam(M_SIZE_PARAM, -1.f, 1.f, 0.f, "Size Mod Amount", "%", 0.f, 100.f);
+        configParam(M_DENSITY_PARAM, -1.f, 1.f, 0.f, "Density Mod Amount", "%", 0.f, 100.f);
+        configParam(M_AMOUNT_ENV_SHAPE_PARAM, -1.f, 1.f, 0.f, "Shape Mod Amount", "%", 0.f, 100.f);
+        configParam(M_AMOUNT_POSITION_PARAM, -1.f, 1.f, 0.f, "Position Mod Amount", "%", 0.f, 100.f);
+        configParam(M_AMOUNT_PITCH_PARAM, -1.f, 1.f, 0.f, "Pitch Mod Amount", "%", 0.f, 100.f);
 
         // --- Config Loop Params (Internal) ---
         configParam(START_PARAM, 0.f, 1.f, 0.f, "Loop Start");
@@ -211,7 +239,6 @@ struct Granular : Module {
 
         // --- Config Inputs ---
         configInput(_1VOCT_INPUT, "1V/Oct Pitch");
-        // Updated input names to "Modulation" (M_)
         configInput(M_SIZE_INPUT, "Size Mod CV");
         configInput(M_DENSITY_INPUT, "Density Mod CV");
         configInput(M_ENV_SHAPE_INPUT, "Shape Mod CV");
@@ -249,47 +276,53 @@ struct Granular : Module {
 
 
         // --- Read & Modulate Base Controls ---
+        // Mod CV Scaling: 0.1f assumes 10V input covers full range.
+        // Now multiplied by Bipolar Amount Knob (-1.0 to 1.0)
 
-        // 1. Density (Modulate Base via M_DENSITY_INPUT)
+        // 1. Density
         float density_raw = params[DENSITY_PARAM].getValue();
-        // Normalize to 0-1 first, because the parameter itself is 1-100
+        // Normalize to 0-1
         float density_norm = rack::math::rescale(density_raw, 1.f, 100.f, 0.f, 1.f);
-        // Apply modulation to the normalized value (acting as knob turn)
-        density_norm += inputs[M_DENSITY_INPUT].getVoltage() * 0.1f;
+        // Apply modulation (CV * Amount * Scale)
+        float density_mod_amount = params[M_DENSITY_PARAM].getValue(); // Range -1 to 1
+        density_norm += inputs[M_DENSITY_INPUT].getVoltage() * density_mod_amount * 0.1f;
         density_norm = rack::math::clamp(density_norm, 0.f, 1.f);
         // Scale back to Hz
         float density_hz_base = rack::math::rescale(density_norm, 0.f, 1.f, 1.f, 100.f);
 
-        // 2. Size (Modulate Base via M_SIZE_INPUT)
+        // 2. Size
         float size_raw = params[SIZE_PARAM].getValue();
-        // Normalize to 0-1
         float size_norm = rack::math::rescale(size_raw, 0.01f, 2.0f, 0.f, 1.f);
-        size_norm += inputs[M_SIZE_INPUT].getVoltage() * 0.1f;
+        // Apply modulation
+        float size_mod_amount = params[M_SIZE_PARAM].getValue(); // Range -1 to 1
+        size_norm += inputs[M_SIZE_INPUT].getVoltage() * size_mod_amount * 0.1f;
         size_norm = rack::math::clamp(size_norm, 0.f, 1.f);
-        // Scale back to seconds
         float grainSize_sec_base = rack::math::rescale(size_norm, 0.f, 1.f, 0.01f, 2.0f);
 
-        // 3. Envelope Shape (Modulate Base via M_ENV_SHAPE_INPUT)
-        // Already 0-1, so direct modulation is fine
+        // 3. Envelope Shape
         float envShape_base = params[ENV_SHAPE_PARAM].getValue();
-        envShape_base += inputs[M_ENV_SHAPE_INPUT].getVoltage() * 0.1f;
+        // Apply modulation
+        float shape_mod_amount = params[M_AMOUNT_ENV_SHAPE_PARAM].getValue(); // Range -1 to 1
+        envShape_base += inputs[M_ENV_SHAPE_INPUT].getVoltage() * shape_mod_amount * 0.1f;
         envShape_base = rack::math::clamp(envShape_base, 0.f, 1.f);
 
-        // 4. Position (Modulate Base via M_POSITION_INPUT)
-        // Already 0-1
+        // 4. Position
         grainSpawnPosition = params[POSITION_PARAM].getValue();
-        grainSpawnPosition += inputs[M_POSITION_INPUT].getVoltage() * 0.1f;
+        // Apply modulation
+        float pos_mod_amount = params[M_AMOUNT_POSITION_PARAM].getValue(); // Range -1 to 1
+        grainSpawnPosition += inputs[M_POSITION_INPUT].getVoltage() * pos_mod_amount * 0.1f;
         grainSpawnPosition = rack::math::clamp(grainSpawnPosition, 0.f, 1.f);
 
         // 5. Pitch
-        // Knob (0-1) + Modulation Input (M_PITCH_INPUT)
         float pitchKnob = params[PITCH_PARAM].getValue();
-        pitchKnob += inputs[M_PITCH_INPUT].getVoltage() * 0.1f;
+        // Apply modulation (Knob range)
+        float pitch_mod_amount = params[M_AMOUNT_PITCH_PARAM].getValue(); // Range -1 to 1
+        pitchKnob += inputs[M_PITCH_INPUT].getVoltage() * pitch_mod_amount * 0.1f;
         pitchKnob = rack::math::clamp(pitchKnob, 0.f, 1.f);
 
         // Convert Knob 0-1 to Octaves (+/- 2)
         float pitchOffsetOctaves = (pitchKnob - 0.5f) * 4.f;
-        // Add 1V/Oct Input
+        // Add 1V/Oct Input (unattenuated)
         float pitchCV = inputs[_1VOCT_INPUT].getVoltage();
         float basePitchVolts = pitchCV + pitchOffsetOctaves;
 
@@ -556,6 +589,19 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     }
     nvgStroke(args.vg);
 
+    // --- Draw Grains (Moved Here: Drawn AFTER Waveform/LoopRegion, BEFORE Lines) ---
+    std::vector<Grain>& activeGrains = module->grains;
+    nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255));
+    nvgStrokeWidth(args.vg, 1.5f);
+    for (const Grain& grain : activeGrains) {
+        double wrappedBufferPos = std::fmod(grain.bufferPos, (double)bufferSize);
+        float grainX = (float)(wrappedBufferPos / bufferSize) * box.size.x;
+        nvgBeginPath(args.vg);
+        nvgMoveTo(args.vg, grainX, 0);
+        nvgLineTo(args.vg, grainX, box.size.y);
+        nvgStroke(args.vg);
+    }
+
     // --- Draw Loop Lines (White) ---
     float startX = module->params[Granular::START_PARAM].getValue() * box.size.x;
     float endX = module->params[Granular::END_PARAM].getValue() * box.size.x;
@@ -582,19 +628,6 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgMoveTo(args.vg, spawnX, 0);
     nvgLineTo(args.vg, spawnX, box.size.y);
     nvgStroke(args.vg);
-
-    // --- Draw Grains ---
-    std::vector<Grain>& activeGrains = module->grains;
-    nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255));
-    nvgStrokeWidth(args.vg, 1.5f);
-    for (const Grain& grain : activeGrains) {
-        double wrappedBufferPos = std::fmod(grain.bufferPos, (double)bufferSize);
-        float grainX = (float)(wrappedBufferPos / bufferSize) * box.size.x;
-        nvgBeginPath(args.vg);
-        nvgMoveTo(args.vg, grainX, 0);
-        nvgLineTo(args.vg, grainX, box.size.y);
-        nvgStroke(args.vg);
-    }
 }
 
 
@@ -610,7 +643,7 @@ struct GranularWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-        // --- Layout from Helper Script ---
+        // --- Layout Updated from Helper Script ---
 
         // COMPRESSION_PARAM
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(184.573, 46.063)), module, Granular::COMPRESSION_PARAM));
@@ -629,16 +662,23 @@ struct GranularWidget : ModuleWidget {
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(130.0, 100.964)), module, Granular::R_POSITION_PARAM));
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(155.0, 100.964)), module, Granular::R_PITCH_PARAM));
 
+        // MODULATION AMOUNT KNOBS (NEW: Trimpots)
+        addParam(createParamCentered<Trimpot>(mm2px(Vec(55.0, 114.0)), module, Granular::M_SIZE_PARAM));
+        addParam(createParamCentered<Trimpot>(mm2px(Vec(80.0, 114.0)), module, Granular::M_DENSITY_PARAM));
+        addParam(createParamCentered<Trimpot>(mm2px(Vec(105.0, 114.0)), module, Granular::M_AMOUNT_ENV_SHAPE_PARAM));
+        addParam(createParamCentered<Trimpot>(mm2px(Vec(130.0, 114.0)), module, Granular::M_AMOUNT_POSITION_PARAM));
+        addParam(createParamCentered<Trimpot>(mm2px(Vec(155.0, 114.0)), module, Granular::M_AMOUNT_PITCH_PARAM));
+
         // INPUTS
-        // Note: _1VOCT_INPUT is at the old Position CV location (184.573, 77.478)
+        // _1VOCT_INPUT (Old Position location)
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(184.573, 77.478)), module, Granular::_1VOCT_INPUT));
 
-        // M_ inputs (Mapped to helper's M_... IDs)
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(55.0, 113.822)), module, Granular::M_SIZE_INPUT));
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(80.0, 113.822)), module, Granular::M_DENSITY_INPUT));
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(105.0, 113.822)), module, Granular::M_ENV_SHAPE_INPUT));
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(130.0, 113.822)), module, Granular::M_POSITION_INPUT));
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(155.0, 113.822)), module, Granular::M_PITCH_INPUT));
+        // Modulation Inputs (Positions shifted to right)
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(62.938, 113.822)), module, Granular::M_SIZE_INPUT));
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(87.937, 113.822)), module, Granular::M_DENSITY_INPUT));
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(112.937, 113.822)), module, Granular::M_ENV_SHAPE_INPUT));
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(137.937, 113.822)), module, Granular::M_POSITION_INPUT));
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(162.937, 113.822)), module, Granular::M_PITCH_INPUT));
 
         // OUTPUT
         addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(184.573, 108.713)), module, Granular::SINE_OUTPUT));
@@ -647,7 +687,6 @@ struct GranularWidget : ModuleWidget {
         addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(184.573, 30.224)), module, Granular::BLINK_LIGHT));
 
         // WAVEFORM DISPLAY
-        // Positioned at Vec(20.0, 30.0) as per previous code (and helper hint at bottom)
         display = new WaveformDisplay();
         display->module = module;
         display->box.pos = mm2px(Vec(20.0, 30.0));
