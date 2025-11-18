@@ -22,6 +22,10 @@ struct WaveformDisplay : rack::TransparentWidget {
     float cacheBoxWidth = 0.f;
     size_t cacheBufferSize = 0; // Detect when a new file is loaded
 
+    // Interaction state
+    enum DragHandle { HANDLE_NONE, HANDLE_POS, HANDLE_START, HANDLE_END };
+    DragHandle currentDragHandle = HANDLE_NONE;
+
     WaveformDisplay() {
         font = APP->window->loadFont(rack::asset::system("res/fonts/ShareTechMono-Regular.ttf"));
     }
@@ -32,12 +36,12 @@ struct WaveformDisplay : rack::TransparentWidget {
     // DECLARE the draw function here
     void draw(const DrawArgs& args) override;
 
-    // --- INTERACTION HANDLERS (Added) ---
+    // --- INTERACTION HANDLERS ---
 
-    // Helper to update param based on mouse X
-    void setPositionFromMouse(Vec pos);
+    // Helper to update specific param based on mouse X
+    void setParamFromMouse(Vec pos, DragHandle handle);
 
-    // Handle clicks (Jump to position)
+    // Handle clicks (Jump to position or grab handle)
     void onButton(const ButtonEvent& e) override;
 
     // Handle Drag Start
@@ -53,19 +57,23 @@ struct Grain {
     double bufferPos;     // Current playback position in the audioBuffer
     float life;           // Current position in the envelope (0.0 to 1.0)
     float lifeIncrement;  // How much to advance life per sample
-    double playbackSpeedRatio; // <-- ADDED
-    float finalEnvShape; // <-- ADDED: Store the randomized shape
+    double playbackSpeedRatio;
+    float finalEnvShape;
 
     // Simple linear interpolation
     float getSample(const std::vector<float>& buffer) {
         if (buffer.empty()) return 0.f;
         size_t bufferSize = buffer.size();
         int index1 = (int)bufferPos;
-        // Use modulo to wrap the read position
+        // Use modulo to wrap the read position safety (though our advance logic handles loops)
         int index2 = (index1 + 1) % bufferSize;
         float frac = bufferPos - index1;
-        float s1 = buffer[index1 % bufferSize]; // Ensure index1 is within bounds
-        float s2 = buffer[index2 % bufferSize]; // Ensure index2 is within bounds
+        // Safety bounds checks
+        if (index1 >= (int)bufferSize) index1 = bufferSize - 1;
+        if (index2 >= (int)bufferSize) index2 = bufferSize - 1;
+
+        float s1 = buffer[index1];
+        float s2 = buffer[index2];
         return (1.f - frac) * s1 + frac * s2;
     }
 
@@ -75,27 +83,43 @@ struct Grain {
         float shape_square = 1.f;
 
         // Shape 0.5 (Triangle): 0 -> 1 -> 0
-        // Calculated as 1.0 - |(life - 0.5) * 2.0|
         float shape_triangle = 1.f - (std::abs(life - 0.5f) * 2.f);
 
         // Shape 1 (Sine/Hann): 0.5 * (1 - cos(2 * PI * life))
         float shape_sine = 0.5f * (1.f - std::cos(2.f * M_PI * life));
 
         if (envShape <= 0.5f) {
-            // Interpolate between Square (0) and Triangle (0.5)
-            float t = envShape * 2.f; // remap 0.0->0.5 to 0.0->1.0
+            float t = envShape * 2.f;
             return (1.f - t) * shape_square + t * shape_triangle;
         } else {
-            // Interpolate between Triangle (0.5) and Sine (1.0)
-            float t = (envShape - 0.5f) * 2.f; // remap 0.5->1.0 to 0.0->1.0
+            float t = (envShape - 0.5f) * 2.f;
             return (1.f - t) * shape_triangle + t * shape_sine;
         }
     }
 
 
-    // Advance the grain
-    void advance() {
-        bufferPos += playbackSpeedRatio; // <-- MODIFIED
+    // Advance the grain with Loop Constraints
+    void advance(double loopStart, double loopEnd) {
+        bufferPos += playbackSpeedRatio;
+
+        // Loop logic: if we hit the end, wrap to start
+        if (bufferPos >= loopEnd) {
+            // Calculate how far past the end we went
+            double overflow = bufferPos - loopEnd;
+            double loopWidth = loopEnd - loopStart;
+
+            // Wrap around
+            if (loopWidth > 0.00001) {
+                 bufferPos = loopStart + std::fmod(overflow, loopWidth);
+            } else {
+                 bufferPos = loopStart;
+            }
+        }
+        // Reverse playback looping (simple version)
+        else if (bufferPos < loopStart) {
+            bufferPos = loopStart; // Just clamp for safety on reverse for now
+        }
+
         life += lifeIncrement;
     }
 
@@ -113,23 +137,23 @@ struct Granular : Module {
         GRAIN_DENSITY_PARAM,
         ENV_SHAPE_PARAM,
         RANDOM_PARAM,
-        // --- ADDED NEW PARAMS ---
         R_SIZE_PARAM,
         R_DENSITY_PARAM,
         R_ENV_SHAPE_PARAM,
         R_POSITION_PARAM,
+        // --- NEW PARAMS ---
+        START_PARAM,
+        END_PARAM,
         // --- END NEW PARAMS ---
         PARAMS_LEN
     };
     // Use the InputId enums
     enum InputId {
         POSITION_INPUT,
-        // --- ADDED NEW INPUTS ---
         R_SIZE_INPUT,
         R_DENSITY_INPUT,
         R_ENV_SHAPE_INPUT,
         R_POSITION_INPUT,
-        // --- END NEW INPUTS ---
         INPUTS_LEN
     };
     // Use the OutputId enums
@@ -145,97 +169,97 @@ struct Granular : Module {
 
     // Buffer to hold the entire audio file (mono)
     std::vector<float> audioBuffer;
-    std::string lastPath = "";
     unsigned int fileSampleRate = 44100;
 
     // --- Granular Engine ---
     std::vector<Grain> grains;
-    static const int MAX_GRAINS = 128; // Increased max grains
+    static const int MAX_GRAINS = 128;
     float grainSpawnTimer = 0.f;
 
-    // This will be read by the WaveformDisplay to show the playhead
+    // Visualization helper
     float grainSpawnPosition = 0.f;
 
-    // Atomic flag to signal when loading is in progress
     std::atomic<bool> isLoading{false};
 
-    // --- Helper function for randomization ---
-    /**
-     * Applies randomization to a base value.
-     * @param base_0_to_1 The base parameter value (0.0 to 1.0)
-     * @param r_knob_0_to_1 The randomization amount (0.0 to 1.0)
-     * @return A new value between 0.0 and 1.0
-     */
     float getClampedRandomizedValue(float base_0_to_1, float r_knob_0_to_1) {
-        // r_knob at 1.0 gives max_deviation of 0.5 (i.e., +/- 50%)
         float max_deviation = r_knob_0_to_1 * 0.5f;
-        // random_offset will be in [-max_deviation, +max_deviation]
         float random_offset = (rack::random::uniform() * 2.f - 1.f) * max_deviation;
-        // Apply offset and clamp to valid 0.0-1.0 range
         return rack::math::clamp(base_0_to_1 + random_offset, 0.f, 1.f);
     }
 
     Granular() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-        // Configure params using original enums
         configParam(POSITION_PARAM, 0.f, 1.f, 0.f, "Position");
-        configParam(GRAIN_SIZE_PARAM, 0.01f, 2.0f, 0.1f, "Grain Size", " s"); // Adjusted range
-        configParam(GRAIN_DENSITY_PARAM, 1.f, 100.f, 0.f, "Grain Density", " Hz"); // Adjusted range
+        configParam(GRAIN_SIZE_PARAM, 0.01f, 2.0f, 0.1f, "Grain Size", " s");
+        configParam(GRAIN_DENSITY_PARAM, 1.f, 100.f, 0.f, "Grain Density", " Hz");
 
-        // Configure new params
         configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Env. Shape");
-        configParam(RANDOM_PARAM, 0.f, 1.f, 0.f, "Random"); // This is for pitch
+        configParam(RANDOM_PARAM, 0.f, 1.f, 0.f, "Random");
 
-        // --- ADDED NEW CONFIGS ---
         configParam(R_SIZE_PARAM, 0.f, 1.f, 0.f, "Size Random");
         configParam(R_DENSITY_PARAM, 0.f, 1.f, 0.f, "Density Random");
         configParam(R_ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Shape Random");
         configParam(R_POSITION_PARAM, 0.f, 1.f, 0.f, "Position Random");
+
+        // New Start/End params (defaults: Start=0, End=1)
+        configParam(START_PARAM, 0.f, 1.f, 0.f, "Loop Start");
+        configParam(END_PARAM, 0.f, 1.f, 1.f, "Loop End");
 
         configInput(POSITION_INPUT, "Position CV");
         configInput(R_SIZE_INPUT, "Size CV");
         configInput(R_DENSITY_INPUT, "Density CV");
         configInput(R_ENV_SHAPE_INPUT, "Shape CV");
         configInput(R_POSITION_INPUT, "Pos. Random CV");
-        // --- END NEW CONFIGS ---
 
         configOutput(AUDIO_OUTPUT, "Audio");
 
         grains.reserve(MAX_GRAINS);
     }
 
-    // MAIN AUDIO PROCESSING (AKA THE AC3 GRANULAR ENGINE)
+    // MAIN AUDIO PROCESSING
     void process(const ProcessArgs& args) override {
         lights[LOADING_LIGHT].setBrightness(isLoading);
 
-        // output silence if loading or buffer is empty
         if (isLoading || audioBuffer.empty()) {
             outputs[AUDIO_OUTPUT].setVoltage(0.f);
             return;
         }
 
+        // --- Read Start/End Loop Points ---
+        float startVal = params[START_PARAM].getValue();
+        float endVal = params[END_PARAM].getValue();
+
+        // Ensure Start < End, swap if necessary for logic safety
+        // (We don't change the knob visual, just the processing logic)
+        float loopStartNorm = std::min(startVal, endVal);
+        float loopEndNorm = std::max(startVal, endVal);
+
+        // Convert to samples
+        double loopStartSamp = loopStartNorm * (double)(audioBuffer.size() - 1);
+        double loopEndSamp = loopEndNorm * (double)(audioBuffer.size() - 1);
+
+        // Safety
+        if (loopEndSamp >= audioBuffer.size()) loopEndSamp = audioBuffer.size() - 1;
+        if (loopStartSamp < 0) loopStartSamp = 0;
+        if (loopStartSamp >= loopEndSamp) loopStartSamp = loopEndSamp - 1; // prevent 0 width
+
+
         // --- Read Controls ---
-        // Get base values
         float density_hz_base = params[GRAIN_DENSITY_PARAM].getValue();
         float grainSize_sec_base = params[GRAIN_SIZE_PARAM].getValue();
-        // Read new knob values
-        float envShape_base = params[ENV_SHAPE_PARAM].getValue(); // This is already 0.0-1.0
-        float random_pitch = params[RANDOM_PARAM].getValue(); // <-- MODIFIED
+        float envShape_base = params[ENV_SHAPE_PARAM].getValue();
+        float random_pitch = params[RANDOM_PARAM].getValue();
 
-        // --- NORMALIZE base values back to 0.0-1.0 for randomization ---
         float density_base_0_to_1 = rack::math::rescale(density_hz_base, 1.f, 100.f, 0.f, 1.f);
         float size_base_0_to_1 = rack::math::rescale(grainSize_sec_base, 0.01f, 2.0f, 0.f, 1.f);
-        // envShape_base is already 0.0-1.0, so no need to rescale.
 
-
-        // Get position from knob and CV
+        // Get position
         grainSpawnPosition = params[POSITION_PARAM].getValue();
-        grainSpawnPosition += inputs[POSITION_INPUT].getVoltage() * 0.1f; // 1V/Oct = 10% change
+        grainSpawnPosition += inputs[POSITION_INPUT].getVoltage() * 0.1f;
         grainSpawnPosition = rack::math::clamp(grainSpawnPosition, 0.f, 1.f);
 
-        // --- Read Randomization Knobs + CV ---
-        // Clamp(knob + cv, 0.0, 1.0)
+        // Random Params
         float r_density_knob = rack::math::clamp(params[R_DENSITY_PARAM].getValue() + inputs[R_DENSITY_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
         float r_size_knob = rack::math::clamp(params[R_SIZE_PARAM].getValue() + inputs[R_SIZE_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
         float r_envShape_knob = rack::math::clamp(params[R_ENV_SHAPE_PARAM].getValue() + inputs[R_ENV_SHAPE_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
@@ -245,39 +269,40 @@ struct Granular : Module {
         // --- Grain Spawning ---
         grainSpawnTimer -= args.sampleTime;
         if (grainSpawnTimer <= 0.f) {
-            // Calculate randomized density
             float density_final_0_to_1 = getClampedRandomizedValue(density_base_0_to_1, r_density_knob);
-            float density_hz = rack::math::rescale(density_final_0_to_1, 0.f, 1.f, 1.f, 100.f); // Use configParam range
-            grainSpawnTimer = 1.f / density_hz; // Reset timer
+            float density_hz = rack::math::rescale(density_final_0_to_1, 0.f, 1.f, 1.f, 100.f);
+            grainSpawnTimer = 1.f / density_hz;
 
             if (grains.size() < MAX_GRAINS) {
                 Grain g;
 
-                // --- Calculate Randomized Grain Properties ---
+                // 1. Position Calculation
+                float position_final_norm = getClampedRandomizedValue(grainSpawnPosition, r_position_knob);
 
-                // 1. Position
-                float position_final = getClampedRandomizedValue(grainSpawnPosition, r_position_knob);
-                g.bufferPos = position_final * (audioBuffer.size() - 1);
+                // ** KEY CHANGE **: Constrain spawn position to the Start/End window
+                // First, map the randomized position to the window?
+                // Or just clamp it? The user said "grains spawned will always be within the start and end points".
+                // Clamping is the safest interpretation that preserves the "Position" knob intent
+                // while adhering to the restriction.
+                if (position_final_norm < loopStartNorm) position_final_norm = loopStartNorm;
+                if (position_final_norm > loopEndNorm) position_final_norm = loopEndNorm;
 
-                // 2. Pitch (from RANDOM_PARAM)
+                g.bufferPos = position_final_norm * (audioBuffer.size() - 1);
+
+                // 2. Pitch
                 float maxSemitoneRange = random_pitch * 12.f;
-                // Get random value in [-maxSemitoneRange, +maxSemitoneRange]
                 float randomSemitones = (rack::random::uniform() * 2.f - 1.f) * maxSemitoneRange;
-                // Convert semitones to playback speed ratio: 2^(semitones/12)
                 g.playbackSpeedRatio = std::pow(2.f, randomSemitones / 12.f);
-                // --- End Pitch Randomization ---
 
                 // 3. Size
                 float size_final_0_to_1 = getClampedRandomizedValue(size_base_0_to_1, r_size_knob);
-                float grainSize_sec = rack::math::rescale(size_final_0_to_1, 0.f, 1.f, 0.01f, 2.0f); // Use configParam range
+                float grainSize_sec = rack::math::rescale(size_final_0_to_1, 0.f, 1.f, 0.01f, 2.0f);
 
-                // 4. Env Shape
+                // 4. Shape
                 g.finalEnvShape = getClampedRandomizedValue(envShape_base, r_envShape_knob);
-                // --- End Randomized Properties ---
 
                 g.life = 0.f;
                 float grainSizeInSamples = grainSize_sec * fileSampleRate;
-                // Ensure grainSizeInSamples is at least 1 to avoid division by zero
                 if (grainSizeInSamples < 1.f) grainSizeInSamples = 1.f;
                 g.lifeIncrement = 1.f / grainSizeInSamples;
 
@@ -291,91 +316,113 @@ struct Granular : Module {
             Grain& g = grains[i];
 
             float sample = g.getSample(audioBuffer);
-            float env = g.getEnvelope(g.finalEnvShape); // Pass the randomized shape
+            float env = g.getEnvelope(g.finalEnvShape);
 
             out += sample * env;
 
-            g.advance();
+            // ** Pass loop points to advance() **
+            g.advance(loopStartSamp, loopEndSamp);
         }
 
-        // Remove dead grains (iterate backwards to safely erase)
         for (int i = grains.size() - 1; i >= 0; i--) {
             if (!grains[i].isAlive()) {
                 grains.erase(grains.begin() + i);
             }
         }
 
-        // Mixdown: divide by sqrt of grain count to avoid harsh clipping - DO NOT REMOVE THIS OR ELSE
         if (!grains.empty()) {
             out /= std::sqrt(grains.size());
         }
 
-        // Output the sample (scaled to +/- 5V)
         outputs[AUDIO_OUTPUT].setVoltage(5.f * out);
     }
 
 
-    // Function to set the new buffer (called from the widget/main thread)
     void setBuffer(std::vector<float> newBuffer, unsigned int newSampleRate) {
         audioBuffer = newBuffer;
         fileSampleRate = newSampleRate;
-        grains.clear(); // Clear all active grains
+        grains.clear();
         isLoading = false;
     }
 };
 
 // --- WaveformDisplay Implementation ---
 
-// Helper to update param based on mouse X
-void WaveformDisplay::setPositionFromMouse(Vec pos) {
+// Helper to update param
+void WaveformDisplay::setParamFromMouse(Vec pos, DragHandle handle) {
     if (!module || box.size.x <= 0.f) return;
 
-    // Calculate 0.0 to 1.0 position based on mouse X relative to widget width
     float newPos = pos.x / box.size.x;
-
-    // Clamp to valid range
     newPos = rack::math::clamp(newPos, 0.f, 1.f);
 
-    // Update the actual module parameter
-    module->params[Granular::POSITION_PARAM].setValue(newPos);
-}
-
-// Handle initial click (Jump to position)
-void WaveformDisplay::onButton(const ButtonEvent& e) {
-    if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
-        // Jump to position on Press
-        if (e.action == GLFW_PRESS) {
-            setPositionFromMouse(e.pos);
-            e.consume(this); // Claim the event
-        }
+    if (handle == HANDLE_POS) {
+        module->params[Granular::POSITION_PARAM].setValue(newPos);
+    } else if (handle == HANDLE_START) {
+        // Optional: prevent dragging start past end
+        // float endVal = module->params[Granular::END_PARAM].getValue();
+        // if (newPos > endVal) newPos = endVal;
+        module->params[Granular::START_PARAM].setValue(newPos);
+    } else if (handle == HANDLE_END) {
+        // Optional: prevent dragging end past start
+        // float startVal = module->params[Granular::START_PARAM].getValue();
+        // if (newPos < startVal) newPos = startVal;
+        module->params[Granular::END_PARAM].setValue(newPos);
     }
-    // Call base class to maintain standard behavior if needed
-    TransparentWidget::onButton(e);
 }
 
-// Handle Drag Start
+void WaveformDisplay::onButton(const ButtonEvent& e) {
+    if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS) {
+        if (!module) return;
+
+        // Determine what was clicked based on proximity
+        float mouseX = e.pos.x;
+        float width = box.size.x;
+
+        // Get X coordinates of lines
+        float posX = module->params[Granular::POSITION_PARAM].getValue() * width;
+        float startX = module->params[Granular::START_PARAM].getValue() * width;
+        float endX = module->params[Granular::END_PARAM].getValue() * width;
+
+        // Threshold in pixels
+        float threshold = 10.0f;
+
+        float distPos = std::abs(mouseX - posX);
+        float distStart = std::abs(mouseX - startX);
+        float distEnd = std::abs(mouseX - endX);
+
+        // Priority: Start/End > Position (since Pos can be jumped to by clicking empty space)
+        if (distStart < threshold && distStart < distEnd) {
+            currentDragHandle = HANDLE_START;
+        } else if (distEnd < threshold) {
+            currentDragHandle = HANDLE_END;
+        } else if (distPos < threshold) {
+            currentDragHandle = HANDLE_POS;
+        } else {
+            // Clicked empty space -> Jump Position
+            currentDragHandle = HANDLE_POS;
+            setParamFromMouse(e.pos, HANDLE_POS);
+        }
+
+        e.consume(this);
+    }
+}
+
 void WaveformDisplay::onDragStart(const DragStartEvent& e) {
     if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
-        // We must consume this to ensure we receive onDragMove events
         e.consume(this);
     }
 }
 
-// Handle Dragging (Scrubbing)
 void WaveformDisplay::onDragMove(const DragMoveEvent& e) {
     if (e.button == GLFW_MOUSE_BUTTON_LEFT) {
-        // Get the global mouse position from the scene and convert it
-        // to the local coordinate system of this widget.
-        // This ensures correct behavior even if dragging outside the widget bounds.
+        // Convert global mouse to local widget coordinates
         Vec localPos = APP->scene->mousePos - getAbsoluteOffset(Vec(0, 0));
-
-        setPositionFromMouse(localPos);
+        setParamFromMouse(localPos, currentDragHandle);
         e.consume(this);
     }
 }
 
 
-// DEFINE the regenerateCache function here, *after* Granular is fully defined
 void WaveformDisplay::regenerateCache() {
     if (!module || box.size.x <= 0) return;
 
@@ -385,7 +432,6 @@ void WaveformDisplay::regenerateCache() {
         return;
     }
 
-    // Resize cache to match pixel width
     displayCache.resize(box.size.x);
     cacheBoxWidth = box.size.x;
     cacheBufferSize = bufferSize;
@@ -407,7 +453,6 @@ void WaveformDisplay::regenerateCache() {
                 minSample = maxSample = 0.f;
             }
         } else {
-            // Find the min/max values for this pixel column
             for (size_t j = startSample; j < endSample; j++) {
                 float sample = module->audioBuffer[j];
                 if (sample < minSample) minSample = sample;
@@ -419,8 +464,6 @@ void WaveformDisplay::regenerateCache() {
 }
 
 
-// --- WaveformDisplay drawing ---
-// DEFINE the draw function here, after Granular is fully defined
 void WaveformDisplay::draw(const DrawArgs& args) {
     // Draw background
     nvgBeginPath(args.vg);
@@ -431,13 +474,11 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     if (!module)
         return;
 
-    // --- Check if cache needs regenerating ---
     size_t bufferSize = module->audioBuffer.size();
     if (bufferSize != cacheBufferSize || box.size.x != cacheBoxWidth) {
         regenerateCache();
     }
 
-    // If buffer is empty (or cache is), draw text
     if (displayCache.empty()) {
         nvgFontSize(args.vg, 14);
         nvgFontFaceId(args.vg, font->handle);
@@ -447,7 +488,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    // --- Draw the WAV's waveform ---
+    // --- Draw Waveform ---
     nvgBeginPath(args.vg);
     nvgStrokeColor(args.vg, nvgRGBA(0, 255, 100, 255));
     nvgStrokeWidth(args.vg, 1.f);
@@ -456,17 +497,35 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         float minSample = displayCache[i].first;
         float maxSample = displayCache[i].second;
 
-        // Map min and max to Y coordinates of the sample
         float y_min = box.size.y - ((minSample + 1.f) / 2.f) * box.size.y;
         float y_max = box.size.y - ((maxSample + 1.f) / 2.f) * box.size.y;
 
-        // Draw a slice of the waveform
-        nvgMoveTo(args.vg, i + 0.5f, y_min); // +0.5f for sharper pixels
+        nvgMoveTo(args.vg, i + 0.5f, y_min);
         nvgLineTo(args.vg, i + 0.5f, y_max);
     }
-    nvgStroke(args.vg); // draw all the vertical lines at once
+    nvgStroke(args.vg);
 
-    // --- Draw Playback Head (grain start position) ---
+    // --- Draw Loop Lines (Start/End) - ORANGE ---
+    float startX = module->params[Granular::START_PARAM].getValue() * box.size.x;
+    float endX = module->params[Granular::END_PARAM].getValue() * box.size.x;
+
+    // Draw Start
+    nvgBeginPath(args.vg);
+    nvgStrokeColor(args.vg, nvgRGBA(255, 165, 0, 200)); // Orange
+    nvgStrokeWidth(args.vg, 2.0f);
+    nvgMoveTo(args.vg, startX, 0);
+    nvgLineTo(args.vg, startX, box.size.y);
+    nvgStroke(args.vg);
+
+    // Draw End
+    nvgBeginPath(args.vg);
+    nvgStrokeColor(args.vg, nvgRGBA(255, 165, 0, 200)); // Orange
+    nvgStrokeWidth(args.vg, 2.0f);
+    nvgMoveTo(args.vg, endX, 0);
+    nvgLineTo(args.vg, endX, box.size.y);
+    nvgStroke(args.vg);
+
+    // --- Draw Playback Head (RED) ---
     float spawnX = module->grainSpawnPosition * box.size.x;
 
     nvgBeginPath(args.vg);
@@ -476,14 +535,12 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgLineTo(args.vg, spawnX, box.size.y);
     nvgStroke(args.vg);
 
-    // --- Draw individual grain heads ---
+    // --- Draw active grains ---
     std::vector<Grain>& activeGrains = module->grains;
-
-    nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255)); //playback head for active grains (blue)
+    nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255));
     nvgStrokeWidth(args.vg, 1.5f);
 
     for (const Grain& grain : activeGrains) {
-        // ensure grains that wrap around the buffer are drawn at the beginning
         double wrappedBufferPos = std::fmod(grain.bufferPos, (double)bufferSize);
         float grainX = (float)(wrappedBufferPos / bufferSize) * box.size.x;
 
@@ -501,7 +558,6 @@ struct GranularWidget : ModuleWidget {
 
     GranularWidget(Granular* module) {
         setModule(module);
-        // Use the new granular.svg file
         setPanel(createPanel(asset::plugin(pluginInstance, "res/granular.svg")));
 
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
@@ -509,25 +565,22 @@ struct GranularWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-        // waveform display - Use new position from helper.py
-        display = new WaveformDisplay(); // Assign to member variable
+        // waveform display
+        display = new WaveformDisplay();
         display->module = module;
         display->box.pos = mm2px(Vec(20.0, 30.0));
-        // Guessing a size based on new layout.
-        display->box.size = mm2px(Vec(150, 45)); // Adjusted size to fit
+        display->box.size = mm2px(Vec(150, 45));
         addChild(display);
 
-        // --- Use new helper.py positions with original ParamIds ---
-
-        // RANDOM_PARAM (Random) - New Pos
+        // RANDOM_PARAM
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(184.573, 46.063)), module, Granular::RANDOM_PARAM));
-        // GRAIN_SIZE_PARAM (Grain Size) - New Pos
+        // GRAIN_SIZE_PARAM
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(54.0, 81.354)), module, Granular::GRAIN_SIZE_PARAM));
-        // GRAIN_DENSITY_PARAM (Grain Density) - New Pos
+        // GRAIN_DENSITY_PARAM
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(84.0, 81.354)), module, Granular::GRAIN_DENSITY_PARAM));
-        // ENV_SHAPE_PARAM (Env Shape) - New Pos
+        // ENV_SHAPE_PARAM
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(114.0, 81.354)), module, Granular::ENV_SHAPE_PARAM));
-        // POSITION_PARAM (Position) - New Pos
+        // POSITION_PARAM
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(144.0, 81.354)), module, Granular::POSITION_PARAM));
 
         // --- ADDED NEW KNOBS (R_..._PARAM) ---
@@ -537,7 +590,7 @@ struct GranularWidget : ModuleWidget {
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(143.965, 100.964)), module, Granular::R_POSITION_PARAM));
         // --- END NEW KNOBS ---
 
-        // POSITION_INPUT (Position CV) - New Pos
+        // POSITION_INPUT (Position CV)
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(184.573, 77.478)), module, Granular::POSITION_INPUT));
 
         // --- ADDED NEW INPUTS (R_..._INPUT) ---
@@ -547,10 +600,10 @@ struct GranularWidget : ModuleWidget {
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(144.192, 113.822)), module, Granular::R_POSITION_INPUT));
         // --- END NEW INPUTS ---
 
-        // AUDIO_OUTPUT (Audio) - New Pos
+        // AUDIO_OUTPUT (Audio)
         addOutput(createOutputCentered<PJ301MPort>(mm2px(Vec(184.573, 108.713)), module, Granular::AUDIO_OUTPUT));
 
-        // LOADING_LIGHT (Loading) - New Pos
+        // LOADING_LIGHT (Loading)
         addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(184.573, 30.224)), module, Granular::LOADING_LIGHT));
     }
 
@@ -564,12 +617,10 @@ struct GranularWidget : ModuleWidget {
 
         if (extension == ".wav") {
             if (module) {
-                // Cast to the module type
                 Granular* granularModule = dynamic_cast<Granular*>(module);
                 if (!granularModule)
                     return;
 
-                // --- Start Loading Logic (on main thread) ---
                 granularModule->isLoading = true;
 
                 unsigned int channels;
@@ -578,7 +629,6 @@ struct GranularWidget : ModuleWidget {
                 float* pSampleData = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &channels, &sampleRate, &totalFrames, NULL);
 
                 if (pSampleData == NULL) {
-                    // Failed to load
                     granularModule->isLoading = false;
                     return;
                 }
@@ -587,24 +637,18 @@ struct GranularWidget : ModuleWidget {
                 newBuffer.resize(totalFrames);
 
                 if (channels == 1) {
-                    // Mono: just copy
                     std::memcpy(newBuffer.data(), pSampleData, totalFrames * sizeof(float));
                 } else {
-                    // Stereo: mix down to mono
                     for (drwav_uint64 i = 0; i < totalFrames; i++) {
                         newBuffer[i] = (pSampleData[i * channels + 0] + pSampleData[i * channels + 1]) * 0.5f;
                     }
                 }
 
-                // Free the data loaded by dr_wav
                 drwav_free(pSampleData, NULL);
-
-                // Directly call setBuffer now that loading is done (isLoading is set to false inside setBuffer)
                 granularModule->setBuffer(newBuffer, sampleRate);
 
-                // --- Invalidate the display cache ---
                 if (display) {
-                    display->cacheBufferSize = 0; // Force cache regen on next draw
+                    display->cacheBufferSize = 0;
                 }
             }
         }
