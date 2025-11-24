@@ -237,9 +237,6 @@ struct Granular : Module {
             // If the buffer exists, write input to it
             if (!audioBuffer.empty()) {
                 float in = inputs[_1VOCT_INPUT].getVoltage();
-                // Important: 1V/Oct inputs are often unattenuated.
-                // Audio signals are typically +/- 5V or 10V.
-                // We write directly.
 
                 if (recHead < audioBuffer.size()) {
                     audioBuffer[recHead] = in;
@@ -252,10 +249,7 @@ struct Granular : Module {
                 }
             }
 
-            // While recording, mute output or passthrough?
-            // Usually granular freezes while recording or plays existing.
-            // To prevent pitch chaos (using Audio as Pitch CV), we skip granular processing or mute.
-            // Let's mute output while recording to be safe.
+            // Mute output while recording
             outputs[SINE_OUTPUT].setVoltage(0.f);
             return;
         }
@@ -310,9 +304,11 @@ struct Granular : Module {
 
         float pitchOffsetOctaves = (pitchKnob - 0.5f) * 4.f;
 
-        // ONLY use input as Pitch CV if we are NOT recording
-        // (Though we already returned early if recording, keeping logic clear)
-        float pitchCV = inputs[_1VOCT_INPUT].getVoltage();
+        // --- CHANGE HERE ---
+        // We forcibly ignore the input jack for pitch calculation.
+        // The jack is now strictly an "Audio Recorder Input".
+        float pitchCV = 0.f;
+
         float basePitchVolts = pitchCV + pitchOffsetOctaves;
 
         float density_base_0_to_1 = density_norm;
