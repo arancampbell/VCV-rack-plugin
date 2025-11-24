@@ -17,6 +17,7 @@ struct WaveformDisplay : rack::TransparentWidget {
     float cacheBoxWidth = 0.f;
     size_t cacheBufferSize = 0;
 
+    // Track previous recording state to trigger zoom-snap on stop
     bool wasRecording = false;
 
     enum DragHandle { HANDLE_NONE, HANDLE_POS, HANDLE_START, HANDLE_END };
@@ -41,11 +42,9 @@ struct Grain {
     double playbackSpeedRatio;
     float finalEnvShape;
 
-    // Updated to take explicit length
     float getSample(const std::vector<float>& buffer, size_t activeLen) {
         if (buffer.empty() || activeLen == 0) return 0.f;
 
-        // Use activeLen, not buffer.size()
         size_t effectiveSize = activeLen;
 
         int index1 = (int)bufferPos;
@@ -142,8 +141,7 @@ struct Granular : Module {
     std::vector<float> audioBuffer;
     unsigned int fileSampleRate = 44100;
 
-    // --- NEW: Track the "Logical" size of the audio ---
-    // (e.g., recorded 2 seconds inside a 10 second buffer)
+    // Logical size of audio (Recorded length OR File length)
     size_t activeBufferLen = 0;
 
     std::vector<Grain> grains;
@@ -152,11 +150,13 @@ struct Granular : Module {
     float grainSpawnPosition = 0.f;
 
     std::atomic<bool> isLoading{false};
-
     std::atomic<bool> isRecording{false};
-    bool wasRecordingPrev = false; // State tracker for toggle OFF detection
-    bool bufferWrapped = false;    // Track if we filled the buffer during rec
+
+    // Make recHead public so Display can see it
     size_t recHead = 0;
+
+    bool wasRecordingPrev = false;
+    bool bufferWrapped = false;
     dsp::SchmittTrigger recTrigger;
 
     float getClampedRandomizedValue(float base_0_to_1, float r_knob_0_to_1) {
@@ -206,24 +206,27 @@ struct Granular : Module {
 
         // --- TRIGGER RECORD START ---
         if (recTrigger.process(recActive ? 10.f : 0.f)) {
+            // Protect against drawing while resizing
+            isLoading = true;
+
             // Allocate 10s if buffer is small
             if (audioBuffer.size() < 44100) {
                 audioBuffer.resize(args.sampleRate * 10.0f);
                 std::fill(audioBuffer.begin(), audioBuffer.end(), 0.f);
                 fileSampleRate = args.sampleRate;
             }
+
             recHead = 0;
             bufferWrapped = false;
+            isLoading = false;
         }
 
         // --- HANDLE RECORD STOP (Trimming logic) ---
         if (wasRecordingPrev && !recActive) {
-            // Recording just finished. Update logical length.
             if (bufferWrapped) {
                 activeBufferLen = audioBuffer.size();
             } else {
-                // We didn't fill the buffer, so the active audio is only up to recHead
-                activeBufferLen = (recHead > 100) ? recHead : 44100; // Minimal safety size
+                activeBufferLen = (recHead > 100) ? recHead : 44100;
             }
         }
         wasRecordingPrev = recActive;
@@ -242,9 +245,10 @@ struct Granular : Module {
                     recHead = 0;
                     bufferWrapped = true;
                 }
-                // During recording, we haven't "finalized" the length yet,
-                // but for visualization purposes (if we wanted) we could set activeBufferLen.
-                // For now, we leave it frozen or update it to max.
+
+                // While recording, the "Active Length" is effectively the whole buffer
+                // so the user sees the full 10s capacity being filled
+                activeBufferLen = audioBuffer.size();
             }
             outputs[SINE_OUTPUT].setVoltage(0.f);
             return;
@@ -262,7 +266,6 @@ struct Granular : Module {
         float loopStartNorm = std::min(startVal, endVal);
         float loopEndNorm = std::max(startVal, endVal);
 
-        // Map 0-1 to 0-activeBufferLen
         double loopStartSamp = loopStartNorm * (double)(activeBufferLen - 1);
         double loopEndSamp = loopEndNorm * (double)(activeBufferLen - 1);
 
@@ -300,10 +303,7 @@ struct Granular : Module {
         pitchKnob = rack::math::clamp(pitchKnob, 0.f, 1.f);
 
         float pitchOffsetOctaves = (pitchKnob - 0.5f) * 4.f;
-
-        // Force Audio Jack to be ignored for pitch during playback
         float pitchCV = 0.f;
-
         float basePitchVolts = pitchCV + pitchOffsetOctaves;
 
         float density_base_0_to_1 = density_norm;
@@ -329,7 +329,6 @@ struct Granular : Module {
                 if (position_final_norm < loopStartNorm) position_final_norm = loopStartNorm;
                 if (position_final_norm > loopEndNorm) position_final_norm = loopEndNorm;
 
-                // Spawn within active length
                 g.bufferPos = position_final_norm * (activeBufferLen - 1);
 
                 float maxRandomOctaves = r_pitch_knob * 1.f;
@@ -354,7 +353,6 @@ struct Granular : Module {
         float out = 0.f;
         for (size_t i = 0; i < grains.size(); ++i) {
             Grain& g = grains[i];
-            // Pass activeBufferLen to getSample
             float sample = g.getSample(audioBuffer, activeBufferLen);
             float env = g.getEnvelope(g.finalEnvShape);
             out += sample * env;
@@ -381,7 +379,6 @@ struct Granular : Module {
 
     void setBuffer(std::vector<float> newBuffer, unsigned int newSampleRate) {
         audioBuffer = newBuffer;
-        // On explicit file load, active length IS the file length
         activeBufferLen = audioBuffer.size();
         fileSampleRate = newSampleRate;
         grains.clear();
@@ -453,35 +450,42 @@ void WaveformDisplay::onDragMove(const DragMoveEvent& e) {
 void WaveformDisplay::regenerateCache() {
     if (!module || box.size.x <= 0) return;
 
-    // Use Active Length, not total capacity
-    size_t bufferSize = module->activeBufferLen;
-    if (bufferSize == 0 || bufferSize > module->audioBuffer.size()) {
+    // DECISION:
+    // If recording: use audioBuffer.size() (Total Capacity)
+    // If playback: use activeBufferLen (Trimmed Length)
+    size_t targetLen = module->isRecording ? module->audioBuffer.size() : module->activeBufferLen;
+
+    if (targetLen == 0 || targetLen > module->audioBuffer.size()) {
         displayCache.clear();
         return;
     }
 
     displayCache.resize(box.size.x);
     cacheBoxWidth = box.size.x;
-    cacheBufferSize = bufferSize;
 
-    float samplesPerPixel = (float)bufferSize / box.size.x;
+    // Store current state to detect changes
+    cacheBufferSize = targetLen;
+
+    float samplesPerPixel = (float)targetLen / box.size.x;
 
     for (int i = 0; i < (int)box.size.x; i++) {
         size_t startSample = (size_t)(i * samplesPerPixel);
         size_t endSample = (size_t)((i + 1) * samplesPerPixel);
-        if (endSample > bufferSize) endSample = bufferSize;
+        if (endSample > targetLen) endSample = targetLen;
 
         float minSample = 1.f;
         float maxSample = -1.f;
 
         if (startSample >= endSample) {
-            if (startSample < bufferSize) {
-                minSample = maxSample = module->audioBuffer[startSample];
+            // Safety check
+            if (startSample < module->audioBuffer.size()) {
+                 minSample = maxSample = module->audioBuffer[startSample];
             } else {
-                minSample = maxSample = 0.f;
+                 minSample = maxSample = 0.f;
             }
         } else {
             for (size_t j = startSample; j < endSample; j++) {
+                if (j >= module->audioBuffer.size()) break;
                 float sample = module->audioBuffer[j];
                 if (sample < minSample) minSample = sample;
                 if (sample > maxSample) maxSample = sample;
@@ -498,28 +502,31 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgFillColor(args.vg, nvgRGBA(20, 20, 20, 255));
     nvgFill(args.vg);
 
-    if (!module) return;
+    if (!module || module->isLoading) return;
 
     bool isRec = module->isRecording;
 
+    // 1. Detect state change (Stop Recording) -> Force Zoom Snap
     if (wasRecording && !isRec) {
         regenerateCache();
     }
     wasRecording = isRec;
 
-    if (isRec) {
-        nvgFontSize(args.vg, 18);
-        nvgFontFaceId(args.vg, font->handle);
-        nvgFillColor(args.vg, nvgRGBA(255, 50, 50, 255));
-        nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nvgText(args.vg, box.size.x / 2, box.size.y / 2, "RECORDING...", NULL);
-        return;
-    }
+    // 2. Setup Dimensions
+    size_t currentLen = isRec ? module->audioBuffer.size() : module->activeBufferLen;
 
-    // Use active length for comparison
-    size_t bufferSize = module->activeBufferLen;
-    if (bufferSize != cacheBufferSize || box.size.x != cacheBoxWidth) {
+    // 3. Logic for LIVE updating
+    if (isRec) {
+        // When recording, we are modifying the buffer, so we MUST regenerate
+        // the visualization to see the line moving.
+        // Optimization: In a super high-perf module, we'd only update the dirty pixel.
+        // For simplicity and robustness here, we regenerate.
         regenerateCache();
+    } else {
+        // When playing, only regenerate if resize happened
+        if (currentLen != cacheBufferSize || box.size.x != cacheBoxWidth) {
+            regenerateCache();
+        }
     }
 
     if (displayCache.empty()) {
@@ -533,7 +540,11 @@ void WaveformDisplay::draw(const DrawArgs& args) {
 
     // --- Draw WAV ---
     nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(100, 100, 100, 100));
+
+    // If recording, use a reddish tint for the waveform so it looks "hot"
+    if (isRec) nvgStrokeColor(args.vg, nvgRGBA(255, 100, 100, 150));
+    else nvgStrokeColor(args.vg, nvgRGBA(100, 100, 100, 100));
+
     nvgStrokeWidth(args.vg, 1.f);
     for (int i = 0; i < (int)displayCache.size(); i++) {
         float minSample = displayCache[i].first;
@@ -544,6 +555,22 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgLineTo(args.vg, i + 0.5f, y_max);
     }
     nvgStroke(args.vg);
+
+    // --- Draw Recording Head (Bright Red Line) ---
+    if (isRec && module->audioBuffer.size() > 0) {
+        float recPos = (float)module->recHead / (float)module->audioBuffer.size();
+        float recPixel = recPos * box.size.x;
+
+        nvgBeginPath(args.vg);
+        nvgStrokeColor(args.vg, nvgRGBA(255, 0, 0, 255));
+        nvgStrokeWidth(args.vg, 1.5f);
+        nvgMoveTo(args.vg, recPixel, 0);
+        nvgLineTo(args.vg, recPixel, box.size.y);
+        nvgStroke(args.vg);
+
+        // Skip drawing Loop/Grain stuff while recording to reduce clutter
+        return;
+    }
 
     // --- Draw Active Loop Region ---
     float startX_norm = module->params[Granular::START_PARAM].getValue();
@@ -571,9 +598,9 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255));
     nvgStrokeWidth(args.vg, 1.5f);
     for (const Grain& grain : activeGrains) {
-        // Use active length for visual mapping
-        double wrappedBufferPos = std::fmod(grain.bufferPos, (double)bufferSize);
-        float grainX = (float)(wrappedBufferPos / bufferSize) * box.size.x;
+        // Visual mapping uses current active length
+        double wrappedBufferPos = std::fmod(grain.bufferPos, (double)currentLen);
+        float grainX = (float)(wrappedBufferPos / currentLen) * box.size.x;
         nvgBeginPath(args.vg);
         nvgMoveTo(args.vg, grainX, 0);
         nvgLineTo(args.vg, grainX, box.size.y);
@@ -608,7 +635,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgStroke(args.vg);
 }
 
-// ... Rest of the code (GranularWidget) remains the same ...
+
 struct GranularWidget : ModuleWidget {
     WaveformDisplay* display = nullptr;
 
@@ -645,7 +672,7 @@ struct GranularWidget : ModuleWidget {
         addParam(createParamCentered<Trimpot>(mm2px(Vec(130.0, 114.0)), module, Granular::M_AMOUNT_POSITION_PARAM));
         addParam(createParamCentered<Trimpot>(mm2px(Vec(155.0, 114.0)), module, Granular::M_AMOUNT_PITCH_PARAM));
 
-        // --- NEW INPUT: 1V/Oct / Audio In + RECORD BUTTON ---
+        // INPUT: 1V/Oct / Audio In + RECORD BUTTON
         addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<WhiteLight>>>(
             mm2px(Vec(184.573, 67.0)),
             module,
