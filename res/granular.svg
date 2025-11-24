@@ -83,9 +83,9 @@
      borderopacity="1.0"
      inkscape:pageopacity="0.0"
      inkscape:pageshadow="2"
-     inkscape:zoom="0.98994949"
-     inkscape:cx="295.9747"
-     inkscape:cy="129.29953"
+     inkscape:zoom="0.77689217"
+     inkscape:cx="371.995"
+     inkscape:cy="87.528235"
      inkscape:document-units="mm"
      inkscape:current-layer="layer2"
      showgrid="false"
@@ -96,8 +96,8 @@
      inkscape:snap-bbox-edge-midpoints="false"
      inkscape:window-width="1512"
      inkscape:window-height="851"
-     inkscape:window-x="1920"
-     inkscape:window-y="326"
+     inkscape:window-x="1194"
+     inkscape:window-y="38"
      inkscape:window-maximized="0"
      inkscape:snap-bbox-midpoints="true"
      inkscape:snap-nodes="false"
@@ -442,11 +442,11 @@
        inkscape:label="sine" />
     <circle
        inkscape:label="blink"
-       r="2"
-       cy="30.224339"
-       cx="184.57265"
-       id="circle66"
-       style="display:inline;opacity:1;vector-effect:none;fill:#ff00ff;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.5;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:normal" />
+       r="1"
+       cy="30.2432"
+       cx="184.60966"
+       id="circle66-4"
+       style="display:inline;vector-effect:none;fill:#ff00ff;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:0.25;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;paint-order:normal" />
     <rect
        style="fill:#ffff00;stroke-width:0.640746"
        id="rect2"
