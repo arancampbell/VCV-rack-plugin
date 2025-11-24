@@ -4,28 +4,21 @@
 #include <atomic>
 #include <cmath>
 
-// Include for windowing function
 #include "dsp/window.hpp"
 #include "dr_wav.h"
 
-
-// Forward-declare the module
 struct Granular;
 
-// A simple widget to display the loaded waveform
 struct WaveformDisplay : rack::TransparentWidget {
     Granular* module = nullptr;
     std::shared_ptr<rack::Font> font;
 
-    // Cache for high-fidelity waveform drawing
     std::vector<std::pair<float, float>> displayCache;
     float cacheBoxWidth = 0.f;
     size_t cacheBufferSize = 0;
 
-    // Track previous recording state to trigger refresh on stop
     bool wasRecording = false;
 
-    // Interaction state
     enum DragHandle { HANDLE_NONE, HANDLE_POS, HANDLE_START, HANDLE_END };
     DragHandle currentDragHandle = HANDLE_NONE;
 
@@ -35,15 +28,12 @@ struct WaveformDisplay : rack::TransparentWidget {
 
     void regenerateCache();
     void draw(const DrawArgs& args) override;
-
-    // --- INTERACTION HANDLERS ---
     void setParamFromMouse(Vec pos, DragHandle handle);
     void onButton(const ButtonEvent& e) override;
     void onDragStart(const DragStartEvent& e) override;
     void onDragMove(const DragMoveEvent& e) override;
 };
 
-// --- Grain Struct ---
 struct Grain {
     double bufferPos;
     float life;
@@ -51,17 +41,21 @@ struct Grain {
     double playbackSpeedRatio;
     float finalEnvShape;
 
-    float getSample(const std::vector<float>& buffer) {
-        if (buffer.empty()) return 0.f;
-        size_t bufferSize = buffer.size();
+    // Updated to take explicit length
+    float getSample(const std::vector<float>& buffer, size_t activeLen) {
+        if (buffer.empty() || activeLen == 0) return 0.f;
+
+        // Use activeLen, not buffer.size()
+        size_t effectiveSize = activeLen;
+
         int index1 = (int)bufferPos;
-        int index2 = (index1 + 1) % bufferSize;
+        int index2 = (index1 + 1) % effectiveSize;
         float frac = bufferPos - index1;
 
         if (index1 < 0) index1 = 0;
-        if (index1 >= (int)bufferSize) index1 = bufferSize - 1;
+        if (index1 >= (int)effectiveSize) index1 = effectiveSize - 1;
         if (index2 < 0) index2 = 0;
-        if (index2 >= (int)bufferSize) index2 = bufferSize - 1;
+        if (index2 >= (int)effectiveSize) index2 = effectiveSize - 1;
 
         float s1 = buffer[index1];
         float s2 = buffer[index2];
@@ -123,12 +117,11 @@ struct Granular : Module {
         M_AMOUNT_PITCH_PARAM,
         START_PARAM,
         END_PARAM,
-        // --- NEW RECORDING PARAM ---
         LIVE_REC_PARAM,
         PARAMS_LEN
     };
     enum InputId {
-        _1VOCT_INPUT, // Repurposed as Audio In when Rec is active
+        _1VOCT_INPUT,
         M_SIZE_INPUT,
         M_DENSITY_INPUT,
         M_ENV_SHAPE_INPUT,
@@ -142,13 +135,16 @@ struct Granular : Module {
     };
     enum LightId {
         BLINK_LIGHT,
-        // --- NEW RECORDING LIGHT ---
         LIVE_REC_LIGHT,
         LIGHTS_LEN
     };
 
     std::vector<float> audioBuffer;
     unsigned int fileSampleRate = 44100;
+
+    // --- NEW: Track the "Logical" size of the audio ---
+    // (e.g., recorded 2 seconds inside a 10 second buffer)
+    size_t activeBufferLen = 0;
 
     std::vector<Grain> grains;
     static const int MAX_GRAINS = 128;
@@ -157,10 +153,11 @@ struct Granular : Module {
 
     std::atomic<bool> isLoading{false};
 
-    // --- Live Recording State ---
     std::atomic<bool> isRecording{false};
+    bool wasRecordingPrev = false; // State tracker for toggle OFF detection
+    bool bufferWrapped = false;    // Track if we filled the buffer during rec
     size_t recHead = 0;
-    dsp::SchmittTrigger recTrigger; // To detect the moment we start recording
+    dsp::SchmittTrigger recTrigger;
 
     float getClampedRandomizedValue(float base_0_to_1, float r_knob_0_to_1) {
         float max_deviation = r_knob_0_to_1 * 0.5f;
@@ -170,39 +167,32 @@ struct Granular : Module {
 
     Granular() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
-
         configParam(COMPRESSION_PARAM, 0.f, 1.f, 0.f, "Compression / Drive");
         configParam(SIZE_PARAM, 0.01f, 2.0f, 0.5f, "Grain Size", " s");
         configParam(DENSITY_PARAM, 1.f, 100.f, 1.f, "Grain Density", " Hz");
         configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.5f, "Envelope Shape");
         configParam(POSITION_PARAM, 0.f, 1.f, 0.f, "Position");
         configParam(PITCH_PARAM, 0.f, 1.f, 0.5f, "Pitch Offset");
-
         configParam(R_SIZE_PARAM, 0.f, 1.f, 0.f, "Randomise Size");
         configParam(R_DENSITY_PARAM, 0.f, 1.f, 0.f, "Randomise Density");
         configParam(R_ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Randomise Shape");
         configParam(R_POSITION_PARAM, 0.f, 1.f, 0.f, "Randomise Position");
         configParam(R_PITCH_PARAM, 0.f, 1.f, 0.f, "Randomise Pitch");
-
         configParam(M_SIZE_PARAM, -1.f, 1.f, 0.f, "Size Mod Amount", "%", 0.f, 100.f);
         configParam(M_DENSITY_PARAM, -1.f, 1.f, 0.f, "Density Mod Amount", "%", 0.f, 100.f);
         configParam(M_AMOUNT_ENV_SHAPE_PARAM, -1.f, 1.f, 0.f, "Shape Mod Amount", "%", 0.f, 100.f);
         configParam(M_AMOUNT_POSITION_PARAM, -1.f, 1.f, 0.f, "Position Mod Amount", "%", 0.f, 100.f);
         configParam(M_AMOUNT_PITCH_PARAM, -1.f, 1.f, 0.f, "Pitch Mod Amount", "%", 0.f, 100.f);
-
         configParam(START_PARAM, 0.f, 1.f, 0.f, "Loop Start");
         configParam(END_PARAM, 0.f, 1.f, 1.f, "Loop End");
-
-        // --- Config Record Latch ---
         configParam(LIVE_REC_PARAM, 0.f, 1.f, 0.f, "Live Input Record");
 
-        configInput(_1VOCT_INPUT, "1V/Oct Pitch / Audio In"); // Updated Label
+        configInput(_1VOCT_INPUT, "1V/Oct Pitch / Audio In");
         configInput(M_SIZE_INPUT, "Size Mod CV");
         configInput(M_DENSITY_INPUT, "Density Mod CV");
         configInput(M_ENV_SHAPE_INPUT, "Shape Mod CV");
         configInput(M_POSITION_INPUT, "Position Mod CV");
         configInput(M_PITCH_INPUT, "Pitch Mod CV");
-
         configOutput(SINE_OUTPUT, "Audio Output");
 
         grains.reserve(MAX_GRAINS);
@@ -211,30 +201,35 @@ struct Granular : Module {
     void process(const ProcessArgs& args) override {
         lights[BLINK_LIGHT].setBrightness(isLoading);
 
-        // --- RECORDING LOGIC ---
         bool recActive = params[LIVE_REC_PARAM].getValue() > 0.5f;
-
-        // Handle Light
         lights[LIVE_REC_LIGHT].setBrightness(recActive ? 1.f : 0.f);
 
-        // Detect start of recording to allocate buffer if empty
+        // --- TRIGGER RECORD START ---
         if (recTrigger.process(recActive ? 10.f : 0.f)) {
-            // User just hit record.
-            // If buffer is empty or very small, allocate 10 seconds of space
+            // Allocate 10s if buffer is small
             if (audioBuffer.size() < 44100) {
-                audioBuffer.resize(args.sampleRate * 10.0f); // 10 seconds
+                audioBuffer.resize(args.sampleRate * 10.0f);
                 std::fill(audioBuffer.begin(), audioBuffer.end(), 0.f);
                 fileSampleRate = args.sampleRate;
             }
-            // Reset head to start (optional, creates loop pedal feel)
             recHead = 0;
+            bufferWrapped = false;
         }
 
+        // --- HANDLE RECORD STOP (Trimming logic) ---
+        if (wasRecordingPrev && !recActive) {
+            // Recording just finished. Update logical length.
+            if (bufferWrapped) {
+                activeBufferLen = audioBuffer.size();
+            } else {
+                // We didn't fill the buffer, so the active audio is only up to recHead
+                activeBufferLen = (recHead > 100) ? recHead : 44100; // Minimal safety size
+            }
+        }
+        wasRecordingPrev = recActive;
         isRecording = recActive;
 
         if (isRecording) {
-            // --- LIVE RECORDING MODE ---
-            // If the buffer exists, write input to it
             if (!audioBuffer.empty()) {
                 float in = inputs[_1VOCT_INPUT].getVoltage();
 
@@ -242,34 +237,36 @@ struct Granular : Module {
                     audioBuffer[recHead] = in;
                 }
 
-                // Increment and Wrap
                 recHead++;
                 if (recHead >= audioBuffer.size()) {
                     recHead = 0;
+                    bufferWrapped = true;
                 }
+                // During recording, we haven't "finalized" the length yet,
+                // but for visualization purposes (if we wanted) we could set activeBufferLen.
+                // For now, we leave it frozen or update it to max.
             }
-
-            // Mute output while recording
             outputs[SINE_OUTPUT].setVoltage(0.f);
             return;
         }
 
-        // --- STANDARD PLAYBACK MODE ---
-
-        if (isLoading || audioBuffer.empty()) {
+        if (isLoading || audioBuffer.empty() || activeBufferLen == 0) {
             outputs[SINE_OUTPUT].setVoltage(0.f);
             return;
         }
 
-        // Standard Granular DSP...
+        // --- STANDARD PLAYBACK (Using activeBufferLen) ---
+
         float startVal = params[START_PARAM].getValue();
         float endVal = params[END_PARAM].getValue();
         float loopStartNorm = std::min(startVal, endVal);
         float loopEndNorm = std::max(startVal, endVal);
-        double loopStartSamp = loopStartNorm * (double)(audioBuffer.size() - 1);
-        double loopEndSamp = loopEndNorm * (double)(audioBuffer.size() - 1);
 
-        if (loopEndSamp >= audioBuffer.size()) loopEndSamp = audioBuffer.size() - 1;
+        // Map 0-1 to 0-activeBufferLen
+        double loopStartSamp = loopStartNorm * (double)(activeBufferLen - 1);
+        double loopEndSamp = loopEndNorm * (double)(activeBufferLen - 1);
+
+        if (loopEndSamp >= activeBufferLen) loopEndSamp = activeBufferLen - 1;
         if (loopStartSamp < 0) loopStartSamp = 0;
         if (loopStartSamp >= loopEndSamp) loopStartSamp = loopEndSamp - 1;
 
@@ -304,9 +301,7 @@ struct Granular : Module {
 
         float pitchOffsetOctaves = (pitchKnob - 0.5f) * 4.f;
 
-        // --- CHANGE HERE ---
-        // We forcibly ignore the input jack for pitch calculation.
-        // The jack is now strictly an "Audio Recorder Input".
+        // Force Audio Jack to be ignored for pitch during playback
         float pitchCV = 0.f;
 
         float basePitchVolts = pitchCV + pitchOffsetOctaves;
@@ -334,7 +329,8 @@ struct Granular : Module {
                 if (position_final_norm < loopStartNorm) position_final_norm = loopStartNorm;
                 if (position_final_norm > loopEndNorm) position_final_norm = loopEndNorm;
 
-                g.bufferPos = position_final_norm * (audioBuffer.size() - 1);
+                // Spawn within active length
+                g.bufferPos = position_final_norm * (activeBufferLen - 1);
 
                 float maxRandomOctaves = r_pitch_knob * 1.f;
                 float randomOctaveOffset = (rack::random::uniform() * 2.f - 1.f) * maxRandomOctaves;
@@ -358,7 +354,8 @@ struct Granular : Module {
         float out = 0.f;
         for (size_t i = 0; i < grains.size(); ++i) {
             Grain& g = grains[i];
-            float sample = g.getSample(audioBuffer);
+            // Pass activeBufferLen to getSample
+            float sample = g.getSample(audioBuffer, activeBufferLen);
             float env = g.getEnvelope(g.finalEnvShape);
             out += sample * env;
             g.advance(loopStartSamp, loopEndSamp);
@@ -384,10 +381,11 @@ struct Granular : Module {
 
     void setBuffer(std::vector<float> newBuffer, unsigned int newSampleRate) {
         audioBuffer = newBuffer;
+        // On explicit file load, active length IS the file length
+        activeBufferLen = audioBuffer.size();
         fileSampleRate = newSampleRate;
         grains.clear();
         isLoading = false;
-        // Ensure we aren't recording if a file is dropped
         isRecording = false;
     }
 };
@@ -455,8 +453,9 @@ void WaveformDisplay::onDragMove(const DragMoveEvent& e) {
 void WaveformDisplay::regenerateCache() {
     if (!module || box.size.x <= 0) return;
 
-    size_t bufferSize = module->audioBuffer.size();
-    if (bufferSize == 0) {
+    // Use Active Length, not total capacity
+    size_t bufferSize = module->activeBufferLen;
+    if (bufferSize == 0 || bufferSize > module->audioBuffer.size()) {
         displayCache.clear();
         return;
     }
@@ -494,7 +493,6 @@ void WaveformDisplay::regenerateCache() {
 
 
 void WaveformDisplay::draw(const DrawArgs& args) {
-    // Draw background
     nvgBeginPath(args.vg);
     nvgRect(args.vg, 0, 0, box.size.x, box.size.y);
     nvgFillColor(args.vg, nvgRGBA(20, 20, 20, 255));
@@ -502,16 +500,13 @@ void WaveformDisplay::draw(const DrawArgs& args) {
 
     if (!module) return;
 
-    // --- CHECK FOR RECORDING STATE ---
     bool isRec = module->isRecording;
 
-    // If we just finished recording, force a cache regeneration to show new waveform
     if (wasRecording && !isRec) {
         regenerateCache();
     }
     wasRecording = isRec;
 
-    // If recording, show text instead of waveform (Thread Safety)
     if (isRec) {
         nvgFontSize(args.vg, 18);
         nvgFontFaceId(args.vg, font->handle);
@@ -521,7 +516,8 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    size_t bufferSize = module->audioBuffer.size();
+    // Use active length for comparison
+    size_t bufferSize = module->activeBufferLen;
     if (bufferSize != cacheBufferSize || box.size.x != cacheBoxWidth) {
         regenerateCache();
     }
@@ -535,7 +531,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    // --- Draw WAV (darkened) ---
+    // --- Draw WAV ---
     nvgBeginPath(args.vg);
     nvgStrokeColor(args.vg, nvgRGBA(100, 100, 100, 100));
     nvgStrokeWidth(args.vg, 1.f);
@@ -549,7 +545,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     }
     nvgStroke(args.vg);
 
-    // --- Draw Active Loop Region (Bright Green) ---
+    // --- Draw Active Loop Region ---
     float startX_norm = module->params[Granular::START_PARAM].getValue();
     float endX_norm = module->params[Granular::END_PARAM].getValue();
     float effectiveStartX_norm = std::min(startX_norm, endX_norm);
@@ -575,6 +571,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255));
     nvgStrokeWidth(args.vg, 1.5f);
     for (const Grain& grain : activeGrains) {
+        // Use active length for visual mapping
         double wrappedBufferPos = std::fmod(grain.bufferPos, (double)bufferSize);
         float grainX = (float)(wrappedBufferPos / bufferSize) * box.size.x;
         nvgBeginPath(args.vg);
@@ -583,7 +580,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgStroke(args.vg);
     }
 
-    // --- Draw Loop Lines (White) ---
+    // --- Draw Loop Lines ---
     float startX = module->params[Granular::START_PARAM].getValue() * box.size.x;
     float endX = module->params[Granular::END_PARAM].getValue() * box.size.x;
 
@@ -601,7 +598,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgLineTo(args.vg, endX, box.size.y);
     nvgStroke(args.vg);
 
-    // --- Draw Playhead (RED) ---
+    // --- Draw Playhead ---
     float spawnX = module->grainSpawnPosition * box.size.x;
     nvgBeginPath(args.vg);
     nvgStrokeColor(args.vg, nvgRGBA(255, 0, 0, 200));
@@ -611,7 +608,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgStroke(args.vg);
 }
 
-
+// ... Rest of the code (GranularWidget) remains the same ...
 struct GranularWidget : ModuleWidget {
     WaveformDisplay* display = nullptr;
 
@@ -649,9 +646,8 @@ struct GranularWidget : ModuleWidget {
         addParam(createParamCentered<Trimpot>(mm2px(Vec(155.0, 114.0)), module, Granular::M_AMOUNT_PITCH_PARAM));
 
         // --- NEW INPUT: 1V/Oct / Audio In + RECORD BUTTON ---
-        // Placing the button slightly above the input jack
         addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<WhiteLight>>>(
-            mm2px(Vec(184.573, 67.0)), // Adjusted Y position above input
+            mm2px(Vec(184.573, 67.0)),
             module,
             Granular::LIVE_REC_PARAM,
             Granular::LIVE_REC_LIGHT
@@ -718,7 +714,6 @@ struct GranularWidget : ModuleWidget {
                 drwav_free(pSampleData, NULL);
                 granularModule->setBuffer(newBuffer, sampleRate);
 
-                // Turn off recording if a file is dropped
                 granularModule->params[Granular::LIVE_REC_PARAM].setValue(0.f);
 
                 if (display) {
