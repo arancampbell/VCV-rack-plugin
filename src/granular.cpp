@@ -20,7 +20,10 @@ struct WaveformDisplay : rack::TransparentWidget {
     // Cache for high-fidelity waveform drawing
     std::vector<std::pair<float, float>> displayCache;
     float cacheBoxWidth = 0.f;
-    size_t cacheBufferSize = 0; // Detect when a new file is loaded
+    size_t cacheBufferSize = 0;
+
+    // Track previous recording state to trigger refresh on stop
+    bool wasRecording = false;
 
     // Interaction state
     enum DragHandle { HANDLE_NONE, HANDLE_POS, HANDLE_START, HANDLE_END };
@@ -30,47 +33,31 @@ struct WaveformDisplay : rack::TransparentWidget {
         font = APP->window->loadFont(rack::asset::system("res/fonts/ShareTechMono-Regular.ttf"));
     }
 
-    // DECLARE the function here, move the definition after Granular
     void regenerateCache();
-
-    // DECLARE the draw function here
     void draw(const DrawArgs& args) override;
 
     // --- INTERACTION HANDLERS ---
-
-    // Helper to update specific param based on mouse X
     void setParamFromMouse(Vec pos, DragHandle handle);
-
-    // Handle clicks (Jump to position or grab handle)
     void onButton(const ButtonEvent& e) override;
-
-    // Handle Drag Start
     void onDragStart(const DragStartEvent& e) override;
-
-    // Handle Dragging (Scrubbing)
     void onDragMove(const DragMoveEvent& e) override;
 };
 
 // --- Grain Struct ---
-// Defines a single grain of audio
 struct Grain {
-    double bufferPos;     // Current playback position in the audioBuffer
-    float life;           // Current position in the envelope (0.0 to 1.0)
-    float lifeIncrement;  // How much to advance life per sample
+    double bufferPos;
+    float life;
+    float lifeIncrement;
     double playbackSpeedRatio;
     float finalEnvShape;
 
-    // Simple linear interpolation
     float getSample(const std::vector<float>& buffer) {
         if (buffer.empty()) return 0.f;
         size_t bufferSize = buffer.size();
         int index1 = (int)bufferPos;
-
-        // Handle looping for read indices safely
         int index2 = (index1 + 1) % bufferSize;
         float frac = bufferPos - index1;
 
-        // Safety bounds checks (though modulo logic in advance() handles most)
         if (index1 < 0) index1 = 0;
         if (index1 >= (int)bufferSize) index1 = bufferSize - 1;
         if (index2 < 0) index2 = 0;
@@ -81,15 +68,9 @@ struct Grain {
         return (1.f - frac) * s1 + frac * s2;
     }
 
-    // Get envelope value
     float getEnvelope(float envShape) {
-        // Shape 0 (Square): 1.0
         float shape_square = 1.f;
-
-        // Shape 0.5 (Triangle): 0 -> 1 -> 0
         float shape_triangle = 1.f - (std::abs(life - 0.5f) * 2.f);
-
-        // Shape 1 (Sine/Hann): 0.5 * (1 - cos(2 * PI * life))
         float shape_sine = 0.5f * (1.f - std::cos(2.f * M_PI * life));
 
         if (envShape <= 0.5f) {
@@ -101,34 +82,24 @@ struct Grain {
         }
     }
 
-
-    // Advance the grain with Loop Constraints
     void advance(double loopStart, double loopEnd) {
         bufferPos += playbackSpeedRatio;
-
-        // Loop logic: if we hit the end, wrap to start
         if (bufferPos >= loopEnd) {
             double overflow = bufferPos - loopEnd;
             double loopWidth = loopEnd - loopStart;
-
-            // Wrap around
             if (loopWidth > 0.00001) {
                  bufferPos = loopStart + std::fmod(overflow, loopWidth);
             } else {
                  bufferPos = loopStart;
             }
         }
-        // Reverse playback looping (simple version)
         else if (bufferPos < loopStart) {
             bufferPos = loopStart;
         }
-
         life += lifeIncrement;
     }
 
-    bool isAlive() {
-        return life < 1.f;
-    }
+    bool isAlive() { return life < 1.f; }
 };
 
 
@@ -145,19 +116,19 @@ struct Granular : Module {
         R_ENV_SHAPE_PARAM,
         R_POSITION_PARAM,
         R_PITCH_PARAM,
-        // --- NEW MODULATION AMOUNT PARAMETERS ---
         M_SIZE_PARAM,
         M_DENSITY_PARAM,
         M_AMOUNT_ENV_SHAPE_PARAM,
         M_AMOUNT_POSITION_PARAM,
         M_AMOUNT_PITCH_PARAM,
-        // ----------------------------------------
-        START_PARAM, // Internal
-        END_PARAM,   // Internal
+        START_PARAM,
+        END_PARAM,
+        // --- NEW RECORDING PARAM ---
+        LIVE_REC_PARAM,
         PARAMS_LEN
     };
     enum InputId {
-        _1VOCT_INPUT,
+        _1VOCT_INPUT, // Repurposed as Audio In when Rec is active
         M_SIZE_INPUT,
         M_DENSITY_INPUT,
         M_ENV_SHAPE_INPUT,
@@ -171,22 +142,25 @@ struct Granular : Module {
     };
     enum LightId {
         BLINK_LIGHT,
+        // --- NEW RECORDING LIGHT ---
+        LIVE_REC_LIGHT,
         LIGHTS_LEN
     };
 
-    // Buffer to hold the entire audio file (mono)
     std::vector<float> audioBuffer;
     unsigned int fileSampleRate = 44100;
 
-    // --- Granular Engine ---
     std::vector<Grain> grains;
     static const int MAX_GRAINS = 128;
     float grainSpawnTimer = 0.f;
-
-    // Visualization helper
     float grainSpawnPosition = 0.f;
 
     std::atomic<bool> isLoading{false};
+
+    // --- Live Recording State ---
+    std::atomic<bool> isRecording{false};
+    size_t recHead = 0;
+    dsp::SchmittTrigger recTrigger; // To detect the moment we start recording
 
     float getClampedRandomizedValue(float base_0_to_1, float r_knob_0_to_1) {
         float max_deviation = r_knob_0_to_1 * 0.5f;
@@ -197,48 +171,32 @@ struct Granular : Module {
     Granular() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-        // --- Config Dials (With updated Defaults) ---
         configParam(COMPRESSION_PARAM, 0.f, 1.f, 0.f, "Compression / Drive");
-
-        // Default Size: 0.5f
         configParam(SIZE_PARAM, 0.01f, 2.0f, 0.5f, "Grain Size", " s");
-
-        // Default Density: Minimum (1.0f which maps to 0% knob position effectively)
         configParam(DENSITY_PARAM, 1.f, 100.f, 1.f, "Grain Density", " Hz");
-
-        // Default Shape: 0.5f
         configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.5f, "Envelope Shape");
-
-        // Default Position: 0.f
         configParam(POSITION_PARAM, 0.f, 1.f, 0.f, "Position");
-
-        // Default Pitch: 0.5f (No pitch shift)
         configParam(PITCH_PARAM, 0.f, 1.f, 0.5f, "Pitch Offset");
 
-        // --- Config Random Dials (Defaults kept at 0.f) ---
         configParam(R_SIZE_PARAM, 0.f, 1.f, 0.f, "Randomise Size");
         configParam(R_DENSITY_PARAM, 0.f, 1.f, 0.f, "Randomise Density");
         configParam(R_ENV_SHAPE_PARAM, 0.f, 1.f, 0.f, "Randomise Shape");
         configParam(R_POSITION_PARAM, 0.f, 1.f, 0.f, "Randomise Position");
         configParam(R_PITCH_PARAM, 0.f, 1.f, 0.f, "Randomise Pitch");
 
-        // --- Config Modulation Amount Dials (Bipolar -1 to 1, Display in %) ---
-        // Range: -1.f to 1.f
-        // Default: 0.f
-        // Unit: "%"
-        // Display Offset: 0.f, Multiplier: 100.f (So 1.0 displays as 100%)
         configParam(M_SIZE_PARAM, -1.f, 1.f, 0.f, "Size Mod Amount", "%", 0.f, 100.f);
         configParam(M_DENSITY_PARAM, -1.f, 1.f, 0.f, "Density Mod Amount", "%", 0.f, 100.f);
         configParam(M_AMOUNT_ENV_SHAPE_PARAM, -1.f, 1.f, 0.f, "Shape Mod Amount", "%", 0.f, 100.f);
         configParam(M_AMOUNT_POSITION_PARAM, -1.f, 1.f, 0.f, "Position Mod Amount", "%", 0.f, 100.f);
         configParam(M_AMOUNT_PITCH_PARAM, -1.f, 1.f, 0.f, "Pitch Mod Amount", "%", 0.f, 100.f);
 
-        // --- Config Loop Params (Internal) ---
         configParam(START_PARAM, 0.f, 1.f, 0.f, "Loop Start");
         configParam(END_PARAM, 0.f, 1.f, 1.f, "Loop End");
 
-        // --- Config Inputs ---
-        configInput(_1VOCT_INPUT, "1V/Oct Pitch");
+        // --- Config Record Latch ---
+        configParam(LIVE_REC_PARAM, 0.f, 1.f, 0.f, "Live Input Record");
+
+        configInput(_1VOCT_INPUT, "1V/Oct Pitch / Audio In"); // Updated Label
         configInput(M_SIZE_INPUT, "Size Mod CV");
         configInput(M_DENSITY_INPUT, "Density Mod CV");
         configInput(M_ENV_SHAPE_INPUT, "Shape Mod CV");
@@ -250,131 +208,148 @@ struct Granular : Module {
         grains.reserve(MAX_GRAINS);
     }
 
-    // MAIN AUDIO PROCESSING
     void process(const ProcessArgs& args) override {
         lights[BLINK_LIGHT].setBrightness(isLoading);
+
+        // --- RECORDING LOGIC ---
+        bool recActive = params[LIVE_REC_PARAM].getValue() > 0.5f;
+
+        // Handle Light
+        lights[LIVE_REC_LIGHT].setBrightness(recActive ? 1.f : 0.f);
+
+        // Detect start of recording to allocate buffer if empty
+        if (recTrigger.process(recActive ? 10.f : 0.f)) {
+            // User just hit record.
+            // If buffer is empty or very small, allocate 10 seconds of space
+            if (audioBuffer.size() < 44100) {
+                audioBuffer.resize(args.sampleRate * 10.0f); // 10 seconds
+                std::fill(audioBuffer.begin(), audioBuffer.end(), 0.f);
+                fileSampleRate = args.sampleRate;
+            }
+            // Reset head to start (optional, creates loop pedal feel)
+            recHead = 0;
+        }
+
+        isRecording = recActive;
+
+        if (isRecording) {
+            // --- LIVE RECORDING MODE ---
+            // If the buffer exists, write input to it
+            if (!audioBuffer.empty()) {
+                float in = inputs[_1VOCT_INPUT].getVoltage();
+                // Important: 1V/Oct inputs are often unattenuated.
+                // Audio signals are typically +/- 5V or 10V.
+                // We write directly.
+
+                if (recHead < audioBuffer.size()) {
+                    audioBuffer[recHead] = in;
+                }
+
+                // Increment and Wrap
+                recHead++;
+                if (recHead >= audioBuffer.size()) {
+                    recHead = 0;
+                }
+            }
+
+            // While recording, mute output or passthrough?
+            // Usually granular freezes while recording or plays existing.
+            // To prevent pitch chaos (using Audio as Pitch CV), we skip granular processing or mute.
+            // Let's mute output while recording to be safe.
+            outputs[SINE_OUTPUT].setVoltage(0.f);
+            return;
+        }
+
+        // --- STANDARD PLAYBACK MODE ---
 
         if (isLoading || audioBuffer.empty()) {
             outputs[SINE_OUTPUT].setVoltage(0.f);
             return;
         }
 
-        // --- Read Start/End Loop Points ---
+        // Standard Granular DSP...
         float startVal = params[START_PARAM].getValue();
         float endVal = params[END_PARAM].getValue();
-
         float loopStartNorm = std::min(startVal, endVal);
         float loopEndNorm = std::max(startVal, endVal);
-
         double loopStartSamp = loopStartNorm * (double)(audioBuffer.size() - 1);
         double loopEndSamp = loopEndNorm * (double)(audioBuffer.size() - 1);
 
-        // Safety
         if (loopEndSamp >= audioBuffer.size()) loopEndSamp = audioBuffer.size() - 1;
         if (loopStartSamp < 0) loopStartSamp = 0;
         if (loopStartSamp >= loopEndSamp) loopStartSamp = loopEndSamp - 1;
 
-
-        // --- Read & Modulate Base Controls ---
-        // Mod CV Scaling: 0.1f assumes 10V input covers full range.
-        // Now multiplied by Bipolar Amount Knob (-1.0 to 1.0)
-
-        // 1. Density
         float density_raw = params[DENSITY_PARAM].getValue();
-        // Normalize to 0-1
         float density_norm = rack::math::rescale(density_raw, 1.f, 100.f, 0.f, 1.f);
-        // Apply modulation (CV * Amount * Scale)
-        float density_mod_amount = params[M_DENSITY_PARAM].getValue(); // Range -1 to 1
+        float density_mod_amount = params[M_DENSITY_PARAM].getValue();
         density_norm += inputs[M_DENSITY_INPUT].getVoltage() * density_mod_amount * 0.1f;
         density_norm = rack::math::clamp(density_norm, 0.f, 1.f);
-        // Scale back to Hz
         float density_hz_base = rack::math::rescale(density_norm, 0.f, 1.f, 1.f, 100.f);
 
-        // 2. Size
         float size_raw = params[SIZE_PARAM].getValue();
         float size_norm = rack::math::rescale(size_raw, 0.01f, 2.0f, 0.f, 1.f);
-        // Apply modulation
-        float size_mod_amount = params[M_SIZE_PARAM].getValue(); // Range -1 to 1
+        float size_mod_amount = params[M_SIZE_PARAM].getValue();
         size_norm += inputs[M_SIZE_INPUT].getVoltage() * size_mod_amount * 0.1f;
         size_norm = rack::math::clamp(size_norm, 0.f, 1.f);
         float grainSize_sec_base = rack::math::rescale(size_norm, 0.f, 1.f, 0.01f, 2.0f);
 
-        // 3. Envelope Shape
         float envShape_base = params[ENV_SHAPE_PARAM].getValue();
-        // Apply modulation
-        float shape_mod_amount = params[M_AMOUNT_ENV_SHAPE_PARAM].getValue(); // Range -1 to 1
+        float shape_mod_amount = params[M_AMOUNT_ENV_SHAPE_PARAM].getValue();
         envShape_base += inputs[M_ENV_SHAPE_INPUT].getVoltage() * shape_mod_amount * 0.1f;
         envShape_base = rack::math::clamp(envShape_base, 0.f, 1.f);
 
-        // 4. Position
         grainSpawnPosition = params[POSITION_PARAM].getValue();
-        // Apply modulation
-        float pos_mod_amount = params[M_AMOUNT_POSITION_PARAM].getValue(); // Range -1 to 1
+        float pos_mod_amount = params[M_AMOUNT_POSITION_PARAM].getValue();
         grainSpawnPosition += inputs[M_POSITION_INPUT].getVoltage() * pos_mod_amount * 0.1f;
         grainSpawnPosition = rack::math::clamp(grainSpawnPosition, 0.f, 1.f);
 
-        // 5. Pitch
         float pitchKnob = params[PITCH_PARAM].getValue();
-        // Apply modulation (Knob range)
-        float pitch_mod_amount = params[M_AMOUNT_PITCH_PARAM].getValue(); // Range -1 to 1
+        float pitch_mod_amount = params[M_AMOUNT_PITCH_PARAM].getValue();
         pitchKnob += inputs[M_PITCH_INPUT].getVoltage() * pitch_mod_amount * 0.1f;
         pitchKnob = rack::math::clamp(pitchKnob, 0.f, 1.f);
 
-        // Convert Knob 0-1 to Octaves (+/- 2)
         float pitchOffsetOctaves = (pitchKnob - 0.5f) * 4.f;
-        // Add 1V/Oct Input (unattenuated)
+
+        // ONLY use input as Pitch CV if we are NOT recording
+        // (Though we already returned early if recording, keeping logic clear)
         float pitchCV = inputs[_1VOCT_INPUT].getVoltage();
         float basePitchVolts = pitchCV + pitchOffsetOctaves;
 
-
-        // --- Normalized Base Values for Randomization Logic ---
         float density_base_0_to_1 = density_norm;
         float size_base_0_to_1 = size_norm;
 
-        // --- Read Random Knobs (Static, No CV) ---
         float r_density_knob = params[R_DENSITY_PARAM].getValue();
         float r_size_knob = params[R_SIZE_PARAM].getValue();
         float r_envShape_knob = params[R_ENV_SHAPE_PARAM].getValue();
         float r_position_knob = params[R_POSITION_PARAM].getValue();
         float r_pitch_knob = params[R_PITCH_PARAM].getValue();
 
-        // Compression
         float compression_amount = params[COMPRESSION_PARAM].getValue();
 
-        // --- Grain Spawning ---
         grainSpawnTimer -= args.sampleTime;
         if (grainSpawnTimer <= 0.f) {
-            // Calculate Randomized Density
             float density_final_0_to_1 = getClampedRandomizedValue(density_base_0_to_1, r_density_knob);
             float density_hz = rack::math::rescale(density_final_0_to_1, 0.f, 1.f, 1.f, 100.f);
             grainSpawnTimer = 1.f / density_hz;
 
             if (grains.size() < MAX_GRAINS) {
                 Grain g;
-
-                // 1. Position (Base + Random)
                 float position_final_norm = getClampedRandomizedValue(grainSpawnPosition, r_position_knob);
-
-                // Clamp to Loop Points
                 if (position_final_norm < loopStartNorm) position_final_norm = loopStartNorm;
                 if (position_final_norm > loopEndNorm) position_final_norm = loopEndNorm;
 
                 g.bufferPos = position_final_norm * (audioBuffer.size() - 1);
 
-                // 2. Pitch (Base + Random)
-                float maxRandomOctaves = r_pitch_knob * 1.f; // +/- 1 octave max random
+                float maxRandomOctaves = r_pitch_knob * 1.f;
                 float randomOctaveOffset = (rack::random::uniform() * 2.f - 1.f) * maxRandomOctaves;
 
                 float totalPitchVolts = basePitchVolts + randomOctaveOffset;
                 g.playbackSpeedRatio = std::pow(2.f, totalPitchVolts);
 
-                // 3. Size (Base + Random)
                 float size_final_0_to_1 = getClampedRandomizedValue(size_base_0_to_1, r_size_knob);
                 float grainSize_sec = rack::math::rescale(size_final_0_to_1, 0.f, 1.f, 0.01f, 2.0f);
 
-                // 4. Shape (Base + Random)
                 g.finalEnvShape = getClampedRandomizedValue(envShape_base, r_envShape_knob);
-
                 g.life = 0.f;
                 float grainSizeInSamples = grainSize_sec * fileSampleRate;
                 if (grainSizeInSamples < 1.f) grainSizeInSamples = 1.f;
@@ -384,7 +359,6 @@ struct Granular : Module {
             }
         }
 
-        // --- Process Grains ---
         float out = 0.f;
         for (size_t i = 0; i < grains.size(); ++i) {
             Grain& g = grains[i];
@@ -400,17 +374,12 @@ struct Granular : Module {
             }
         }
 
-        // Mixdown Normalization
         if (!grains.empty()) {
             out /= std::sqrt(grains.size());
         }
 
-        // --- Compression / Drive Stage ---
-        // Simple makeup gain and saturation
         float makeupGain = 1.0f + (compression_amount * 3.0f);
         out *= makeupGain;
-
-        // Soft clipping (tanh)
         out = 5.0f * std::tanh(out);
 
         outputs[SINE_OUTPUT].setVoltage(out);
@@ -422,15 +391,15 @@ struct Granular : Module {
         fileSampleRate = newSampleRate;
         grains.clear();
         isLoading = false;
+        // Ensure we aren't recording if a file is dropped
+        isRecording = false;
     }
 };
 
 // --- WaveformDisplay Implementation ---
 
-// Helper to update param
 void WaveformDisplay::setParamFromMouse(Vec pos, DragHandle handle) {
     if (!module || box.size.x <= 0.f) return;
-
     float newPos = pos.x / box.size.x;
     newPos = rack::math::clamp(newPos, 0.f, 1.f);
 
@@ -446,7 +415,6 @@ void WaveformDisplay::setParamFromMouse(Vec pos, DragHandle handle) {
 void WaveformDisplay::onButton(const ButtonEvent& e) {
     if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS) {
         if (!module) return;
-
         float mouseX = e.pos.x;
         float width = box.size.x;
 
@@ -455,7 +423,6 @@ void WaveformDisplay::onButton(const ButtonEvent& e) {
         float endX = module->params[Granular::END_PARAM].getValue() * width;
 
         float threshold = 10.0f;
-
         float distPos = std::abs(mouseX - posX);
         float distStart = std::abs(mouseX - startX);
         float distEnd = std::abs(mouseX - endX);
@@ -537,8 +504,26 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgFillColor(args.vg, nvgRGBA(20, 20, 20, 255));
     nvgFill(args.vg);
 
-    if (!module)
+    if (!module) return;
+
+    // --- CHECK FOR RECORDING STATE ---
+    bool isRec = module->isRecording;
+
+    // If we just finished recording, force a cache regeneration to show new waveform
+    if (wasRecording && !isRec) {
+        regenerateCache();
+    }
+    wasRecording = isRec;
+
+    // If recording, show text instead of waveform (Thread Safety)
+    if (isRec) {
+        nvgFontSize(args.vg, 18);
+        nvgFontFaceId(args.vg, font->handle);
+        nvgFillColor(args.vg, nvgRGBA(255, 50, 50, 255));
+        nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgText(args.vg, box.size.x / 2, box.size.y / 2, "RECORDING...", NULL);
         return;
+    }
 
     size_t bufferSize = module->audioBuffer.size();
     if (bufferSize != cacheBufferSize || box.size.x != cacheBoxWidth) {
@@ -550,7 +535,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgFontFaceId(args.vg, font->handle);
         nvgFillColor(args.vg, nvgRGBA(255, 255, 255, 100));
         nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nvgText(args.vg, box.size.x / 2, box.size.y / 2, "Drop .WAV file here", NULL);
+        nvgText(args.vg, box.size.x / 2, box.size.y / 2, "Drop WAV or REC", NULL);
         return;
     }
 
@@ -589,7 +574,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     }
     nvgStroke(args.vg);
 
-    // --- Draw Grains (Moved Here: Drawn AFTER Waveform/LoopRegion, BEFORE Lines) ---
+    // --- Draw Grains ---
     std::vector<Grain>& activeGrains = module->grains;
     nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255));
     nvgStrokeWidth(args.vg, 1.5f);
@@ -607,14 +592,14 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     float endX = module->params[Granular::END_PARAM].getValue() * box.size.x;
 
     nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 200)); // White
+    nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 200));
     nvgStrokeWidth(args.vg, 3.0f);
     nvgMoveTo(args.vg, startX, 0);
     nvgLineTo(args.vg, startX, box.size.y);
     nvgStroke(args.vg);
 
     nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 200)); // White
+    nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 200));
     nvgStrokeWidth(args.vg, 3.0f);
     nvgMoveTo(args.vg, endX, 0);
     nvgLineTo(args.vg, endX, box.size.y);
@@ -643,8 +628,6 @@ struct GranularWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-        // --- Layout Updated from Helper Script ---
-
         // COMPRESSION_PARAM
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(184.573, 46.063)), module, Granular::COMPRESSION_PARAM));
 
@@ -662,18 +645,26 @@ struct GranularWidget : ModuleWidget {
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(130.0, 100.964)), module, Granular::R_POSITION_PARAM));
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(155.0, 100.964)), module, Granular::R_PITCH_PARAM));
 
-        // MODULATION AMOUNT KNOBS (NEW: Trimpots)
+        // MODULATION AMOUNT KNOBS
         addParam(createParamCentered<Trimpot>(mm2px(Vec(55.0, 114.0)), module, Granular::M_SIZE_PARAM));
         addParam(createParamCentered<Trimpot>(mm2px(Vec(80.0, 114.0)), module, Granular::M_DENSITY_PARAM));
         addParam(createParamCentered<Trimpot>(mm2px(Vec(105.0, 114.0)), module, Granular::M_AMOUNT_ENV_SHAPE_PARAM));
         addParam(createParamCentered<Trimpot>(mm2px(Vec(130.0, 114.0)), module, Granular::M_AMOUNT_POSITION_PARAM));
         addParam(createParamCentered<Trimpot>(mm2px(Vec(155.0, 114.0)), module, Granular::M_AMOUNT_PITCH_PARAM));
 
-        // INPUTS
-        // _1VOCT_INPUT (Old Position location)
+        // --- NEW INPUT: 1V/Oct / Audio In + RECORD BUTTON ---
+        // Placing the button slightly above the input jack
+        addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<WhiteLight>>>(
+            mm2px(Vec(184.573, 67.0)), // Adjusted Y position above input
+            module,
+            Granular::LIVE_REC_PARAM,
+            Granular::LIVE_REC_LIGHT
+        ));
+
+        // _1VOCT_INPUT (Shared with Audio Rec)
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(184.573, 77.478)), module, Granular::_1VOCT_INPUT));
 
-        // Modulation Inputs (Positions shifted to right)
+        // Modulation Inputs
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(62.938, 113.822)), module, Granular::M_SIZE_INPUT));
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(87.937, 113.822)), module, Granular::M_DENSITY_INPUT));
         addInput(createInputCentered<PJ301MPort>(mm2px(Vec(112.937, 113.822)), module, Granular::M_ENV_SHAPE_INPUT));
@@ -694,10 +685,8 @@ struct GranularWidget : ModuleWidget {
         addChild(display);
     }
 
-    // Handle file drag-and-drop
     void onPathDrop(const PathDropEvent& e) override {
-        if (e.paths.empty())
-            return;
+        if (e.paths.empty()) return;
 
         std::string path = e.paths[0];
         std::string extension = rack::system::getExtension(path);
@@ -705,8 +694,7 @@ struct GranularWidget : ModuleWidget {
         if (extension == ".wav") {
             if (module) {
                 Granular* granularModule = dynamic_cast<Granular*>(module);
-                if (!granularModule)
-                    return;
+                if (!granularModule) return;
 
                 granularModule->isLoading = true;
 
@@ -733,6 +721,9 @@ struct GranularWidget : ModuleWidget {
 
                 drwav_free(pSampleData, NULL);
                 granularModule->setBuffer(newBuffer, sampleRate);
+
+                // Turn off recording if a file is dropped
+                granularModule->params[Granular::LIVE_REC_PARAM].setValue(0.f);
 
                 if (display) {
                     display->cacheBufferSize = 0;
