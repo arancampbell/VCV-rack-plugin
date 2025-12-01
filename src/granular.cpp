@@ -8,6 +8,12 @@
 #include "dsp/window.hpp"
 #include "dr_wav.h"
 
+// --- SHARED CONSTANTS FOR SYNC DIVISIONS ---
+// 1/32, 1/16, 1/8, 1/4, 1/2, 1 Bar, 2 Bars, 4 Bars
+const float SYNC_DIVISIONS[] = { 0.03125f, 0.0625f, 0.125f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
+const char* SYNC_LABELS[] = { "1/32", "1/16", "1/8", "1/4", "1/2", "1 Bar", "2 Bars", "4 Bars" };
+const int NUM_SYNC_DIVS = 8;
+
 struct Granular;
 
 struct WaveformDisplay : rack::TransparentWidget {
@@ -41,39 +47,31 @@ struct WaveformDisplay : rack::TransparentWidget {
     }
 
     // Helper: Map frequency to specific spectrum gradient
-    // 0hz(Dark Red) -> 150hz(Red) -> 200hz(Orange) -> 350hz(Green) -> 1000hz(Cyan) -> 5000hz(Blue) -> 15000hz+(Dark Blue)
     NVGcolor getFreqColor(float freq) {
-        // 0Hz (Dark Red) -> 150Hz (Red)
         if (freq < 150.f) {
             float t = freq / 150.f;
             return lerpColor(nvgRGB(100, 0, 0), nvgRGB(255, 0, 0), t);
         }
-        // 150Hz (Red) -> 200Hz (Orange)
         else if (freq < 200.f) {
             float t = (freq - 150.f) / (200.f - 150.f);
             return lerpColor(nvgRGB(255, 0, 0), nvgRGB(255, 165, 0), t);
         }
-        // 200Hz (Orange) -> 350Hz (Green)
         else if (freq < 350.f) {
             float t = (freq - 200.f) / (350.f - 200.f);
             return lerpColor(nvgRGB(255, 165, 0), nvgRGB(0, 255, 0), t);
         }
-        // 350Hz (Green) -> 1000Hz (Cyan)
         else if (freq < 1000.f) {
             float t = (freq - 350.f) / (1000.f - 350.f);
             return lerpColor(nvgRGB(0, 255, 0), nvgRGB(0, 255, 255), t);
         }
-        // 1000Hz (Cyan) -> 5000Hz (Blue)
         else if (freq < 5000.f) {
             float t = (freq - 1000.f) / (5000.f - 1000.f);
             return lerpColor(nvgRGB(0, 255, 255), nvgRGB(0, 0, 255), t);
         }
-        // 5000Hz (Blue) -> 15000Hz (Dark Blue)
         else if (freq < 15000.f) {
             float t = (freq - 5000.f) / (15000.f - 5000.f);
             return lerpColor(nvgRGB(0, 0, 255), nvgRGB(0, 0, 100), t);
         }
-        // > 15000Hz (Dark Blue)
         else {
             return nvgRGB(0, 0, 100);
         }
@@ -169,6 +167,8 @@ struct Granular : Module {
         START_PARAM,
         END_PARAM,
         LIVE_REC_PARAM,
+        BPM_PARAM,
+        SYNC_PARAM,
         PARAMS_LEN
     };
     enum InputId {
@@ -190,13 +190,44 @@ struct Granular : Module {
         LIGHTS_LEN
     };
 
+    // --- Custom ParamQuantities for Hover Text ---
+    struct SizeParamQuantity : rack::engine::ParamQuantity {
+        std::string getDisplayValueString() override {
+            Granular* mod = dynamic_cast<Granular*>(module);
+            if (mod && mod->params[Granular::SYNC_PARAM].getValue() > 0.5f) {
+                // Map 0.01 - 2.0 to 0 - 1
+                float val = getValue();
+                float valNorm = rack::math::rescale(val, 0.01f, 2.0f, 0.f, 1.f);
+                valNorm = rack::math::clamp(valNorm, 0.f, 1.f);
+                int index = (int)(valNorm * (NUM_SYNC_DIVS - 1) + 0.5f);
+                if (index >= 0 && index < NUM_SYNC_DIVS) return SYNC_LABELS[index];
+            }
+            return ParamQuantity::getDisplayValueString();
+        }
+    };
+
+    struct DensityParamQuantity : rack::engine::ParamQuantity {
+        std::string getDisplayValueString() override {
+            Granular* mod = dynamic_cast<Granular*>(module);
+            if (mod && mod->params[Granular::SYNC_PARAM].getValue() > 0.5f) {
+                // Map 1 - 100 to 0 - 1
+                float val = getValue();
+                float valNorm = rack::math::rescale(val, 1.f, 100.f, 0.f, 1.f);
+
+                // INVERT Logic for Display (100 -> 1/32, 1 -> 4 Bars)
+                valNorm = 1.f - rack::math::clamp(valNorm, 0.f, 1.f);
+
+                int index = (int)(valNorm * (NUM_SYNC_DIVS - 1) + 0.5f);
+                if (index >= 0 && index < NUM_SYNC_DIVS) return SYNC_LABELS[index];
+            }
+            return ParamQuantity::getDisplayValueString();
+        }
+    };
+
     std::vector<float> audioBuffer;
     unsigned int fileSampleRate = 44100;
 
-    // Logical size of audio (Recorded length OR File length)
     size_t activeBufferLen = 0;
-
-    // <--- CHANGED: Added flag to track if buffer contains raw 5V audio or normalized WAV data
     bool bufferIsRawVoltage = false;
 
     std::vector<Grain> grains;
@@ -207,9 +238,7 @@ struct Granular : Module {
     std::atomic<bool> isLoading{false};
     std::atomic<bool> isRecording{false};
 
-    // Make recHead public so Display can see it
     size_t recHead = 0;
-
     bool wasRecordingPrev = false;
     bool bufferWrapped = false;
     dsp::SchmittTrigger recTrigger;
@@ -223,8 +252,11 @@ struct Granular : Module {
     Granular() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
         configParam(COMPRESSION_PARAM, 0.f, 1.f, 0.f, "Compression / Drive");
-        configParam(SIZE_PARAM, 0.01f, 2.0f, 0.5f, "Grain Size", " s");
-        configParam(DENSITY_PARAM, 1.f, 100.f, 1.f, "Grain Density", " Hz");
+
+        // Use Custom ParamQuantities
+        configParam<SizeParamQuantity>(SIZE_PARAM, 0.01f, 2.0f, 0.5f, "Grain Size", " s");
+        configParam<DensityParamQuantity>(DENSITY_PARAM, 1.f, 100.f, 1.f, "Grain Density", " Hz");
+
         configParam(ENV_SHAPE_PARAM, 0.f, 1.f, 0.5f, "Envelope Shape");
         configParam(POSITION_PARAM, 0.f, 1.f, 0.f, "Position");
         configParam(PITCH_PARAM, 0.f, 1.f, 0.5f, "Pitch Offset");
@@ -241,6 +273,9 @@ struct Granular : Module {
         configParam(START_PARAM, 0.f, 1.f, 0.f, "Loop Start");
         configParam(END_PARAM, 0.f, 1.f, 1.f, "Loop End");
         configParam(LIVE_REC_PARAM, 0.f, 1.f, 0.f, "Live Input Record");
+
+        configParam(BPM_PARAM, 30.f, 300.f, 120.f, "BPM");
+        configSwitch(SYNC_PARAM, 0.f, 1.f, 0.f, "Sync Mode", {"Free", "Synced"});
 
         configInput(_1VOCT_INPUT, "1V/Oct Pitch / Audio In");
         configInput(M_SIZE_INPUT, "Size Mod CV");
@@ -263,24 +298,19 @@ struct Granular : Module {
         if (recTrigger.process(recActive ? 10.f : 0.f)) {
             isLoading = true;
 
-            // Allocate 10s if buffer is small
             if (audioBuffer.size() < 44100) {
                 audioBuffer.resize(args.sampleRate * 10.0f);
                 fileSampleRate = args.sampleRate;
             }
 
-            // --- FIX 1: CLEAR BUFFER ON START TO PREVENT GHOSTS ---
             std::fill(audioBuffer.begin(), audioBuffer.end(), 0.f);
-
-            // <--- CHANGED: Mark buffer as raw voltage (requires scaling in display)
             bufferIsRawVoltage = true;
-
             recHead = 0;
             bufferWrapped = false;
             isLoading = false;
         }
 
-        // --- HANDLE RECORD STOP (Trimming logic) ---
+        // --- HANDLE RECORD STOP ---
         if (wasRecordingPrev && !recActive) {
             if (bufferWrapped) {
                 activeBufferLen = audioBuffer.size();
@@ -294,17 +324,14 @@ struct Granular : Module {
         if (isRecording) {
             if (!audioBuffer.empty()) {
                 float in = inputs[_1VOCT_INPUT].getVoltage();
-
                 if (recHead < audioBuffer.size()) {
                     audioBuffer[recHead] = in;
                 }
-
                 recHead++;
                 if (recHead >= audioBuffer.size()) {
                     recHead = 0;
                     bufferWrapped = true;
                 }
-
                 activeBufferLen = audioBuffer.size();
             }
             outputs[SINE_OUTPUT].setVoltage(0.f);
@@ -316,7 +343,7 @@ struct Granular : Module {
             return;
         }
 
-        // --- STANDARD PLAYBACK (Using activeBufferLen) ---
+        // --- STANDARD PLAYBACK ---
 
         float startVal = params[START_PARAM].getValue();
         float endVal = params[END_PARAM].getValue();
@@ -330,19 +357,64 @@ struct Granular : Module {
         if (loopStartSamp < 0) loopStartSamp = 0;
         if (loopStartSamp >= loopEndSamp) loopStartSamp = loopEndSamp - 1;
 
+        // --- SYNC & BPM LOGIC START ---
+
+        bool isSynced = params[SYNC_PARAM].getValue() > 0.5f;
+        float currentBPM = params[BPM_PARAM].getValue();
+        float secondsPerBeat = 60.f / currentBPM;
+
+        // 1. DENSITY CALCULATION
+        float density_hz_final = 10.f;
+
         float density_raw = params[DENSITY_PARAM].getValue();
         float density_norm = rack::math::rescale(density_raw, 1.f, 100.f, 0.f, 1.f);
         float density_mod_amount = params[M_DENSITY_PARAM].getValue();
         density_norm += inputs[M_DENSITY_INPUT].getVoltage() * density_mod_amount * 0.1f;
-        density_norm = rack::math::clamp(density_norm, 0.f, 1.f);
-        float density_hz_base = rack::math::rescale(density_norm, 0.f, 1.f, 1.f, 100.f);
+
+        float density_base_0_to_1 = rack::math::clamp(density_norm, 0.f, 1.f);
+        float r_density_knob = params[R_DENSITY_PARAM].getValue();
+        float density_rand_0_to_1 = getClampedRandomizedValue(density_base_0_to_1, r_density_knob);
+
+        if (isSynced) {
+            // INVERT MAPPING: 1.0 (High Knob) -> 1/32 (Index 0)
+            //                 0.0 (Low Knob)  -> 4 Bars (Index Max)
+            float inverted_density = 1.f - density_rand_0_to_1;
+
+            int index = (int)(inverted_density * (NUM_SYNC_DIVS - 1) + 0.5f);
+            index = rack::math::clamp(index, 0, NUM_SYNC_DIVS - 1);
+
+            float divMultiplier = SYNC_DIVISIONS[index];
+            float period = secondsPerBeat * divMultiplier;
+            if (period < 0.0001f) period = 0.0001f;
+            density_hz_final = 1.f / period;
+        } else {
+            // Free Mode: Map 0..1 back to 1..100 Hz
+            density_hz_final = rack::math::rescale(density_rand_0_to_1, 0.f, 1.f, 1.f, 100.f);
+        }
+
+        // 2. SIZE CALCULATION
+        float grainSize_sec_final = 0.1f;
 
         float size_raw = params[SIZE_PARAM].getValue();
         float size_norm = rack::math::rescale(size_raw, 0.01f, 2.0f, 0.f, 1.f);
         float size_mod_amount = params[M_SIZE_PARAM].getValue();
         size_norm += inputs[M_SIZE_INPUT].getVoltage() * size_mod_amount * 0.1f;
-        size_norm = rack::math::clamp(size_norm, 0.f, 1.f);
-        float grainSize_sec_base = rack::math::rescale(size_norm, 0.f, 1.f, 0.01f, 2.0f);
+
+        float size_base_0_to_1 = rack::math::clamp(size_norm, 0.f, 1.f);
+        float r_size_knob = params[R_SIZE_PARAM].getValue();
+        float size_rand_0_to_1 = getClampedRandomizedValue(size_base_0_to_1, r_size_knob);
+
+        if (isSynced) {
+            int index = (int)(size_rand_0_to_1 * (NUM_SYNC_DIVS - 1) + 0.5f);
+            index = rack::math::clamp(index, 0, NUM_SYNC_DIVS - 1);
+
+            float divMultiplier = SYNC_DIVISIONS[index];
+            grainSize_sec_final = secondsPerBeat * divMultiplier;
+        } else {
+             grainSize_sec_final = rack::math::rescale(size_rand_0_to_1, 0.f, 1.f, 0.01f, 2.0f);
+        }
+
+        // --- OTHER PARAMS ---
 
         float envShape_base = params[ENV_SHAPE_PARAM].getValue();
         float shape_mod_amount = params[M_AMOUNT_ENV_SHAPE_PARAM].getValue();
@@ -360,25 +432,20 @@ struct Granular : Module {
         pitchKnob = rack::math::clamp(pitchKnob, 0.f, 1.f);
 
         float pitchOffsetOctaves = (pitchKnob - 0.5f) * 4.f;
-        float pitchCV = 0.f;
-        float basePitchVolts = pitchCV + pitchOffsetOctaves;
+        float basePitchVolts = pitchOffsetOctaves;
 
-        float density_base_0_to_1 = density_norm;
-        float size_base_0_to_1 = size_norm;
-
-        float r_density_knob = params[R_DENSITY_PARAM].getValue();
-        float r_size_knob = params[R_SIZE_PARAM].getValue();
         float r_envShape_knob = params[R_ENV_SHAPE_PARAM].getValue();
         float r_position_knob = params[R_POSITION_PARAM].getValue();
         float r_pitch_knob = params[R_PITCH_PARAM].getValue();
 
         float compression_amount = params[COMPRESSION_PARAM].getValue();
 
+        // --- SPAWNING ---
+
         grainSpawnTimer -= args.sampleTime;
         if (grainSpawnTimer <= 0.f) {
-            float density_final_0_to_1 = getClampedRandomizedValue(density_base_0_to_1, r_density_knob);
-            float density_hz = rack::math::rescale(density_final_0_to_1, 0.f, 1.f, 1.f, 100.f);
-            grainSpawnTimer = 1.f / density_hz;
+            // Use Calculated Frequency
+            grainSpawnTimer = 1.f / density_hz_final;
 
             if (grains.size() < MAX_GRAINS) {
                 Grain g;
@@ -394,8 +461,8 @@ struct Granular : Module {
                 float totalPitchVolts = basePitchVolts + randomOctaveOffset;
                 g.playbackSpeedRatio = std::pow(2.f, totalPitchVolts);
 
-                float size_final_0_to_1 = getClampedRandomizedValue(size_base_0_to_1, r_size_knob);
-                float grainSize_sec = rack::math::rescale(size_final_0_to_1, 0.f, 1.f, 0.01f, 2.0f);
+                // Use Calculated Size
+                float grainSize_sec = grainSize_sec_final;
 
                 g.finalEnvShape = getClampedRandomizedValue(envShape_base, r_envShape_knob);
                 g.life = 0.f;
@@ -439,10 +506,7 @@ struct Granular : Module {
         activeBufferLen = audioBuffer.size();
         fileSampleRate = newSampleRate;
         grains.clear();
-
-        // <--- CHANGED: Reset raw voltage flag because WAVs are usually normalized
         bufferIsRawVoltage = false;
-
         isLoading = false;
         isRecording = false;
     }
@@ -534,11 +598,9 @@ void WaveformDisplay::regenerateCache() {
         float minSample = 100.0f;
         float maxSample = -100.0f;
 
-        // --- Zero Crossing Frequency Estimation ---
         int crossings = 0;
         float prev = 0.f;
 
-        // Initialize prev for ZCR check
         if (startSample < module->audioBuffer.size()) {
              if (startSample > 0) prev = module->audioBuffer[startSample - 1];
              else prev = module->audioBuffer[startSample];
@@ -555,14 +617,11 @@ void WaveformDisplay::regenerateCache() {
                 if (j >= module->audioBuffer.size()) break;
                 float sample = module->audioBuffer[j];
 
-                // Count Zero Crossings (Simple sign change detection)
                 if ((sample >= 0 && prev < 0) || (sample < 0 && prev >= 0)) {
                     crossings++;
                 }
                 prev = sample;
 
-                // --- FIX 2A: SCALING FOR DISPLAY ---
-                // If the buffer contains raw 5V audio (recorded), scale down to 1.0 range
                 if (module->bufferIsRawVoltage) sample /= 5.0f;
 
                 if (sample < minSample) minSample = sample;
@@ -570,16 +629,13 @@ void WaveformDisplay::regenerateCache() {
             }
         }
 
-        // --- FIX 2B: CLAMPING FOR DISPLAY ---
-        // Force visual range to -1 to 1 to stay within box
         minSample = rack::math::clamp(minSample, -1.f, 1.f);
         maxSample = rack::math::clamp(maxSample, -1.f, 1.f);
 
         displayCache[i] = {minSample, maxSample};
 
-        // Calculate Frequency from ZCR
         float duration = (float)(endSample - startSample) / (float)module->fileSampleRate;
-        if (duration <= 0.00001f) duration = 1.0f; // Prevent div by zero
+        if (duration <= 0.00001f) duration = 1.0f;
         float freq = (crossings / 2.0f) / duration;
         displayColorCache[i] = getFreqColor(freq);
     }
@@ -587,8 +643,6 @@ void WaveformDisplay::regenerateCache() {
 
 
 void WaveformDisplay::draw(const DrawArgs& args) {
-    // --- FIX 3: SCISSORING (CROP) ---
-    // Prevent any drawing from spilling outside the widget box
     nvgScissor(args.vg, 0, 0, box.size.x, box.size.y);
 
     nvgBeginPath(args.vg);
@@ -628,17 +682,15 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    // --- Draw WAV (Background/Inactive) ---
-    // Now drawn per-segment to allow for colored "ghosting"
     nvgStrokeWidth(args.vg, 1.f);
     for (int i = 0; i < (int)displayCache.size(); i++) {
         nvgBeginPath(args.vg);
 
         if (isRec) {
-            nvgStrokeColor(args.vg, nvgRGBA(255, 100, 100, 150)); // Red if recording
+            nvgStrokeColor(args.vg, nvgRGBA(255, 100, 100, 150));
         } else {
             NVGcolor col = displayColorCache[i];
-            col.a = 0.4f; // Dim the frequency colors for inactive background
+            col.a = 0.4f;
             nvgStrokeColor(args.vg, col);
         }
 
@@ -652,7 +704,6 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgStroke(args.vg);
     }
 
-    // --- Draw Recording Head ---
     if (isRec && module->audioBuffer.size() > 0) {
         float recPos = (float)module->recHead / (float)module->audioBuffer.size();
         float recPixel = recPos * box.size.x;
@@ -668,7 +719,6 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    // --- Draw Active Loop Region (Colored by Frequency) ---
     float startX_norm = module->params[Granular::START_PARAM].getValue();
     float endX_norm = module->params[Granular::END_PARAM].getValue();
     float effectiveStartX_norm = std::min(startX_norm, endX_norm);
@@ -679,21 +729,16 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgStrokeWidth(args.vg, 1.f);
     for (int i = startPixel; i < endPixel && i < (int)displayCache.size(); i++) {
         nvgBeginPath(args.vg);
-
-        // Use full brightness frequency color for the active region
         nvgStrokeColor(args.vg, displayColorCache[i]);
-
         float minSample = displayCache[i].first;
         float maxSample = displayCache[i].second;
         float y_min = box.size.y - ((minSample + 1.f) / 2.f) * box.size.y;
         float y_max = box.size.y - ((maxSample + 1.f) / 2.f) * box.size.y;
-
         nvgMoveTo(args.vg, i + 0.5f, y_min);
         nvgLineTo(args.vg, i + 0.5f, y_max);
         nvgStroke(args.vg);
     }
 
-    // --- Draw Grains ---
     std::vector<Grain>& activeGrains = module->grains;
     nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255));
     nvgStrokeWidth(args.vg, 1.5f);
@@ -706,11 +751,8 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgStroke(args.vg);
     }
 
-    // --- RESET SCISSOR ---
-    // We reset here so we can draw the UI lines (and their arrows) extending outside the box
     nvgResetScissor(args.vg);
 
-    // --- Draw Loop Lines (Start/End) ---
     float startX = module->params[Granular::START_PARAM].getValue() * box.size.x;
     float endX = module->params[Granular::END_PARAM].getValue() * box.size.x;
 
@@ -718,37 +760,27 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 200));
     nvgStrokeWidth(args.vg, 3.0f);
 
-    // Start Line
     nvgMoveTo(args.vg, startX, box.size.y);
     nvgLineTo(args.vg, startX, 0);
-    // Start Arrow
     nvgLineTo(args.vg, startX - 4, -6);
     nvgLineTo(args.vg, startX + 4, -6);
     nvgLineTo(args.vg, startX, 0);
     nvgMoveTo(args.vg, startX, 0);
 
-    // End Line
     nvgMoveTo(args.vg, endX, box.size.y);
     nvgLineTo(args.vg, endX, 0);
-    // End Arrow
     nvgLineTo(args.vg, endX - 4, -6);
     nvgLineTo(args.vg, endX + 4, -6);
     nvgLineTo(args.vg, endX, 0);
     nvgMoveTo(args.vg, endX, 0);
-
     nvgStroke(args.vg);
 
-    // --- Draw Playhead (Position) ---
     float spawnX = module->grainSpawnPosition * box.size.x;
-
     nvgBeginPath(args.vg);
     nvgStrokeColor(args.vg, nvgRGBA(255, 0, 0, 200));
     nvgStrokeWidth(args.vg, 2.0f);
-
-    // Position Line
     nvgMoveTo(args.vg, spawnX, box.size.y);
     nvgLineTo(args.vg, spawnX, 0);
-    // Position Arrow
     nvgLineTo(args.vg, spawnX - 4, -6);
     nvgLineTo(args.vg, spawnX + 4, -6);
     nvgLineTo(args.vg, spawnX, 0);
@@ -757,17 +789,14 @@ void WaveformDisplay::draw(const DrawArgs& args) {
 }
 
 
-// --- ADDED: Small visualizer for Envelope Shape ---
 struct ShapeDisplay : rack::TransparentWidget {
     Granular* module = nullptr;
 
     void draw(const DrawArgs& args) override {
         if (!module || box.size.x <= 0.f) return;
 
-        // Calculate effective shape (knob + modulation)
         float envShape = module->params[Granular::ENV_SHAPE_PARAM].getValue();
 
-        // Add modulation visualization if you want it "live"
         if (module->inputs[Granular::M_ENV_SHAPE_INPUT].isConnected()) {
              float shape_mod_amount = module->params[Granular::M_AMOUNT_ENV_SHAPE_PARAM].getValue();
              envShape += module->inputs[Granular::M_ENV_SHAPE_INPUT].getVoltage() * shape_mod_amount * 0.1f;
@@ -775,23 +804,15 @@ struct ShapeDisplay : rack::TransparentWidget {
         }
 
         nvgBeginPath(args.vg);
-        nvgStrokeColor(args.vg, nvgRGBA(0, 0, 0, 255)); // Black line
+        nvgStrokeColor(args.vg, nvgRGBA(0, 0, 0, 255));
         nvgStrokeWidth(args.vg, 1.5f);
-
-        // Start at bottom-left corner to draw the "walls" of the shape
         nvgMoveTo(args.vg, 0, box.size.y);
 
-        // Draw curve across width of box
-        // Use ceil to ensure we iterate enough times to cover the fractional width
         int limit = (int)std::ceil(box.size.x);
         for (int i = 0; i <= limit; i++) {
-            // Clamp x to the actual box width so the last point is exactly on the edge
             float x = (i < box.size.x) ? (float)i : box.size.x;
-
-            // Normalize life based on the clamped x
             float life = x / box.size.x;
 
-            // Envelope Math (Must match Grain::getEnvelope)
             float shape_square = 1.f;
             float shape_triangle = 1.f - (std::abs(life - 0.5f) * 2.f);
             float shape_sine = 0.5f * (1.f - std::cos(2.f * M_PI * life));
@@ -804,23 +825,40 @@ struct ShapeDisplay : rack::TransparentWidget {
                 float t = (envShape - 0.5f) * 2.f;
                 val = (1.f - t) * shape_triangle + t * shape_sine;
             }
-
-            // Map 0..1 value to box height (invert Y because 0 is top)
             float y = box.size.y - (val * box.size.y);
-
             nvgLineTo(args.vg, x, y);
         }
-
-        // End at bottom-right corner to close the shape visually
         nvgLineTo(args.vg, box.size.x, box.size.y);
-
         nvgStroke(args.vg);
     }
 };
 
+struct SimpleLabel : Widget {
+    std::string text;
+    std::shared_ptr<Font> font;
+
+    SimpleLabel() {
+        font = APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
+    }
+
+    void draw(const DrawArgs& args) override {
+        if (!font) return;
+        nvgFontSize(args.vg, 12);
+        nvgFontFaceId(args.vg, font->handle);
+        nvgFillColor(args.vg, nvgRGBA(255, 255, 255, 255));
+        nvgText(args.vg, 0, 0, text.c_str(), NULL);
+    }
+};
 
 struct GranularWidget : ModuleWidget {
     WaveformDisplay* display = nullptr;
+
+    SimpleLabel* createLabel(Vec pos, std::string text) {
+        SimpleLabel* label = new SimpleLabel;
+        label->box.pos = pos;
+        label->text = text;
+        return label;
+    }
 
     GranularWidget(Granular* module) {
         setModule(module);
@@ -830,6 +868,14 @@ struct GranularWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
+
+        // --- NEW CONTROLS (BPM & SYNC) ---
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(10.0, 15.0)), module, Granular::BPM_PARAM));
+        addChild(createLabel(mm2px(Vec(4.0, 8.0)), "BPM"));
+
+        addParam(createParamCentered<CKSS>(mm2px(Vec(25.0, 15.0)), module, Granular::SYNC_PARAM));
+        addChild(createLabel(mm2px(Vec(20.0, 8.0)), "SYNC"));
+
 
         // COMPRESSION_PARAM
         addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(184.573, 46.063)), module, Granular::COMPRESSION_PARAM));
@@ -886,12 +932,11 @@ struct GranularWidget : ModuleWidget {
         display->box.size = mm2px(Vec(150, 45));
         addChild(display);
 
-        // --- ADDED: Shape Display Widget ---
+        // Shape Display Widget
         ShapeDisplay* shapeDisplay = new ShapeDisplay();
         shapeDisplay->module = module;
-        // Placed centered above the Shape Knob (x=105)
         shapeDisplay->box.pos = mm2px(Vec(113, 85));
-        shapeDisplay->box.size = mm2px(Vec(6, 4)); // made smaller whilst maintaining original 3:2 ratio (prev 15, 10)
+        shapeDisplay->box.size = mm2px(Vec(6, 4));
         addChild(shapeDisplay);
     }
 
