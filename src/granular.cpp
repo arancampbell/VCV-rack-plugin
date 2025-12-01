@@ -652,6 +652,68 @@ void WaveformDisplay::draw(const DrawArgs& args) {
 }
 
 
+// --- ADDED: Small visualizer for Envelope Shape ---
+struct ShapeDisplay : rack::TransparentWidget {
+    Granular* module = nullptr;
+
+    void draw(const DrawArgs& args) override {
+        if (!module || box.size.x <= 0.f) return;
+
+        // Calculate effective shape (knob + modulation)
+        float envShape = module->params[Granular::ENV_SHAPE_PARAM].getValue();
+
+        // Add modulation visualization if you want it "live"
+        if (module->inputs[Granular::M_ENV_SHAPE_INPUT].isConnected()) {
+             float shape_mod_amount = module->params[Granular::M_AMOUNT_ENV_SHAPE_PARAM].getValue();
+             envShape += module->inputs[Granular::M_ENV_SHAPE_INPUT].getVoltage() * shape_mod_amount * 0.1f;
+             envShape = rack::math::clamp(envShape, 0.f, 1.f);
+        }
+
+        nvgBeginPath(args.vg);
+        nvgStrokeColor(args.vg, nvgRGBA(0, 0, 0, 255)); // Black line
+        nvgStrokeWidth(args.vg, 1.5f);
+
+        // Start at bottom-left corner to draw the "walls" of the shape
+        nvgMoveTo(args.vg, 0, box.size.y);
+
+        // Draw curve across width of box
+        // Use ceil to ensure we iterate enough times to cover the fractional width
+        int limit = (int)std::ceil(box.size.x);
+        for (int i = 0; i <= limit; i++) {
+            // Clamp x to the actual box width so the last point is exactly on the edge
+            float x = (i < box.size.x) ? (float)i : box.size.x;
+
+            // Normalize life based on the clamped x
+            float life = x / box.size.x;
+
+            // Envelope Math (Must match Grain::getEnvelope)
+            float shape_square = 1.f;
+            float shape_triangle = 1.f - (std::abs(life - 0.5f) * 2.f);
+            float shape_sine = 0.5f * (1.f - std::cos(2.f * M_PI * life));
+
+            float val = 0.f;
+            if (envShape <= 0.5f) {
+                float t = envShape * 2.f;
+                val = (1.f - t) * shape_square + t * shape_triangle;
+            } else {
+                float t = (envShape - 0.5f) * 2.f;
+                val = (1.f - t) * shape_triangle + t * shape_sine;
+            }
+
+            // Map 0..1 value to box height (invert Y because 0 is top)
+            float y = box.size.y - (val * box.size.y);
+
+            nvgLineTo(args.vg, x, y);
+        }
+
+        // End at bottom-right corner to close the shape visually
+        nvgLineTo(args.vg, box.size.x, box.size.y);
+
+        nvgStroke(args.vg);
+    }
+};
+
+
 struct GranularWidget : ModuleWidget {
     WaveformDisplay* display = nullptr;
 
@@ -718,6 +780,14 @@ struct GranularWidget : ModuleWidget {
         display->box.pos = mm2px(Vec(20.0, 30.0));
         display->box.size = mm2px(Vec(150, 45));
         addChild(display);
+
+        // --- ADDED: Shape Display Widget ---
+        ShapeDisplay* shapeDisplay = new ShapeDisplay();
+        shapeDisplay->module = module;
+        // Placed centered above the Shape Knob (x=105)
+        shapeDisplay->box.pos = mm2px(Vec(113, 85));
+        shapeDisplay->box.size = mm2px(Vec(6, 4)); // made smaller whilst maintaining original 3:2 ratio (prev 15, 10)
+        addChild(shapeDisplay);
     }
 
     void onPathDrop(const PathDropEvent& e) override {
