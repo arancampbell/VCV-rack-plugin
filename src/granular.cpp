@@ -3,6 +3,7 @@
 #include <string>
 #include <atomic>
 #include <cmath>
+#include <algorithm> // For std::max, std::min
 
 #include "dsp/window.hpp"
 #include "dr_wav.h"
@@ -14,6 +15,7 @@ struct WaveformDisplay : rack::TransparentWidget {
     std::shared_ptr<rack::Font> font;
 
     std::vector<std::pair<float, float>> displayCache;
+    std::vector<NVGcolor> displayColorCache; // Store colors per pixel column
     float cacheBoxWidth = 0.f;
     size_t cacheBufferSize = 0;
 
@@ -25,6 +27,56 @@ struct WaveformDisplay : rack::TransparentWidget {
 
     WaveformDisplay() {
         font = APP->window->loadFont(rack::asset::system("res/fonts/ShareTechMono-Regular.ttf"));
+    }
+
+    // Helper: Interpolate between two colors
+    NVGcolor lerpColor(NVGcolor c1, NVGcolor c2, float t) {
+        t = rack::math::clamp(t, 0.f, 1.f);
+        return nvgRGBAf(
+            c1.r + (c2.r - c1.r) * t,
+            c1.g + (c2.g - c1.g) * t,
+            c1.b + (c2.b - c1.b) * t,
+            1.0f
+        );
+    }
+
+    // Helper: Map frequency to specific spectrum gradient
+    // 0hz(Dark Red) -> 150hz(Red) -> 200hz(Orange) -> 350hz(Green) -> 1000hz(Cyan) -> 5000hz(Blue) -> 15000hz+(Dark Blue)
+    NVGcolor getFreqColor(float freq) {
+        // 0Hz (Dark Red) -> 150Hz (Red)
+        if (freq < 150.f) {
+            float t = freq / 150.f;
+            return lerpColor(nvgRGB(100, 0, 0), nvgRGB(255, 0, 0), t);
+        }
+        // 150Hz (Red) -> 200Hz (Orange)
+        else if (freq < 200.f) {
+            float t = (freq - 150.f) / (200.f - 150.f);
+            return lerpColor(nvgRGB(255, 0, 0), nvgRGB(255, 165, 0), t);
+        }
+        // 200Hz (Orange) -> 350Hz (Green)
+        else if (freq < 350.f) {
+            float t = (freq - 200.f) / (350.f - 200.f);
+            return lerpColor(nvgRGB(255, 165, 0), nvgRGB(0, 255, 0), t);
+        }
+        // 350Hz (Green) -> 1000Hz (Cyan)
+        else if (freq < 1000.f) {
+            float t = (freq - 350.f) / (1000.f - 350.f);
+            return lerpColor(nvgRGB(0, 255, 0), nvgRGB(0, 255, 255), t);
+        }
+        // 1000Hz (Cyan) -> 5000Hz (Blue)
+        else if (freq < 5000.f) {
+            float t = (freq - 1000.f) / (5000.f - 1000.f);
+            return lerpColor(nvgRGB(0, 255, 255), nvgRGB(0, 0, 255), t);
+        }
+        // 5000Hz (Blue) -> 15000Hz (Dark Blue)
+        else if (freq < 15000.f) {
+            float t = (freq - 5000.f) / (15000.f - 5000.f);
+            return lerpColor(nvgRGB(0, 0, 255), nvgRGB(0, 0, 100), t);
+        }
+        // > 15000Hz (Dark Blue)
+        else {
+            return nvgRGB(0, 0, 100);
+        }
     }
 
     void regenerateCache();
@@ -463,10 +515,12 @@ void WaveformDisplay::regenerateCache() {
 
     if (targetLen == 0 || targetLen > module->audioBuffer.size()) {
         displayCache.clear();
+        displayColorCache.clear();
         return;
     }
 
     displayCache.resize(box.size.x);
+    displayColorCache.resize(box.size.x);
     cacheBoxWidth = box.size.x;
     cacheBufferSize = targetLen;
 
@@ -480,6 +534,16 @@ void WaveformDisplay::regenerateCache() {
         float minSample = 100.0f;
         float maxSample = -100.0f;
 
+        // --- Zero Crossing Frequency Estimation ---
+        int crossings = 0;
+        float prev = 0.f;
+
+        // Initialize prev for ZCR check
+        if (startSample < module->audioBuffer.size()) {
+             if (startSample > 0) prev = module->audioBuffer[startSample - 1];
+             else prev = module->audioBuffer[startSample];
+        }
+
         if (startSample >= endSample) {
             if (startSample < module->audioBuffer.size()) {
                  minSample = maxSample = module->audioBuffer[startSample];
@@ -491,8 +555,13 @@ void WaveformDisplay::regenerateCache() {
                 if (j >= module->audioBuffer.size()) break;
                 float sample = module->audioBuffer[j];
 
+                // Count Zero Crossings (Simple sign change detection)
+                if ((sample >= 0 && prev < 0) || (sample < 0 && prev >= 0)) {
+                    crossings++;
+                }
+                prev = sample;
+
                 // --- FIX 2A: SCALING FOR DISPLAY ---
-                // <--- CHANGED: Now using bufferIsRawVoltage instead of isRecording
                 // If the buffer contains raw 5V audio (recorded), scale down to 1.0 range
                 if (module->bufferIsRawVoltage) sample /= 5.0f;
 
@@ -507,6 +576,12 @@ void WaveformDisplay::regenerateCache() {
         maxSample = rack::math::clamp(maxSample, -1.f, 1.f);
 
         displayCache[i] = {minSample, maxSample};
+
+        // Calculate Frequency from ZCR
+        float duration = (float)(endSample - startSample) / (float)module->fileSampleRate;
+        if (duration <= 0.00001f) duration = 1.0f; // Prevent div by zero
+        float freq = (crossings / 2.0f) / duration;
+        displayColorCache[i] = getFreqColor(freq);
     }
 }
 
@@ -553,22 +628,29 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    // --- Draw WAV ---
-    nvgBeginPath(args.vg);
-
-    if (isRec) nvgStrokeColor(args.vg, nvgRGBA(255, 100, 100, 150));
-    else nvgStrokeColor(args.vg, nvgRGBA(100, 100, 100, 100));
-
+    // --- Draw WAV (Background/Inactive) ---
+    // Now drawn per-segment to allow for colored "ghosting"
     nvgStrokeWidth(args.vg, 1.f);
     for (int i = 0; i < (int)displayCache.size(); i++) {
+        nvgBeginPath(args.vg);
+
+        if (isRec) {
+            nvgStrokeColor(args.vg, nvgRGBA(255, 100, 100, 150)); // Red if recording
+        } else {
+            NVGcolor col = displayColorCache[i];
+            col.a = 0.4f; // Dim the frequency colors for inactive background
+            nvgStrokeColor(args.vg, col);
+        }
+
         float minSample = displayCache[i].first;
         float maxSample = displayCache[i].second;
         float y_min = box.size.y - ((minSample + 1.f) / 2.f) * box.size.y;
         float y_max = box.size.y - ((maxSample + 1.f) / 2.f) * box.size.y;
+
         nvgMoveTo(args.vg, i + 0.5f, y_min);
         nvgLineTo(args.vg, i + 0.5f, y_max);
+        nvgStroke(args.vg);
     }
-    nvgStroke(args.vg);
 
     // --- Draw Recording Head ---
     if (isRec && module->audioBuffer.size() > 0) {
@@ -586,7 +668,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         return;
     }
 
-    // --- Draw Active Loop Region ---
+    // --- Draw Active Loop Region (Colored by Frequency) ---
     float startX_norm = module->params[Granular::START_PARAM].getValue();
     float endX_norm = module->params[Granular::END_PARAM].getValue();
     float effectiveStartX_norm = std::min(startX_norm, endX_norm);
@@ -594,18 +676,22 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     int startPixel = (int)(effectiveStartX_norm * box.size.x);
     int endPixel = (int)(effectiveEndX_norm * box.size.x);
 
-    nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(0, 255, 100, 255));
     nvgStrokeWidth(args.vg, 1.f);
     for (int i = startPixel; i < endPixel && i < (int)displayCache.size(); i++) {
+        nvgBeginPath(args.vg);
+
+        // Use full brightness frequency color for the active region
+        nvgStrokeColor(args.vg, displayColorCache[i]);
+
         float minSample = displayCache[i].first;
         float maxSample = displayCache[i].second;
         float y_min = box.size.y - ((minSample + 1.f) / 2.f) * box.size.y;
         float y_max = box.size.y - ((maxSample + 1.f) / 2.f) * box.size.y;
+
         nvgMoveTo(args.vg, i + 0.5f, y_min);
         nvgLineTo(args.vg, i + 0.5f, y_max);
+        nvgStroke(args.vg);
     }
-    nvgStroke(args.vg);
 
     // --- Draw Grains ---
     std::vector<Grain>& activeGrains = module->grains;
