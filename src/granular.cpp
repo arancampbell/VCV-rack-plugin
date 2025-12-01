@@ -144,6 +144,9 @@ struct Granular : Module {
     // Logical size of audio (Recorded length OR File length)
     size_t activeBufferLen = 0;
 
+    // <--- CHANGED: Added flag to track if buffer contains raw 5V audio or normalized WAV data
+    bool bufferIsRawVoltage = false;
+
     std::vector<Grain> grains;
     static const int MAX_GRAINS = 128;
     float grainSpawnTimer = 0.f;
@@ -216,6 +219,9 @@ struct Granular : Module {
 
             // --- FIX 1: CLEAR BUFFER ON START TO PREVENT GHOSTS ---
             std::fill(audioBuffer.begin(), audioBuffer.end(), 0.f);
+
+            // <--- CHANGED: Mark buffer as raw voltage (requires scaling in display)
+            bufferIsRawVoltage = true;
 
             recHead = 0;
             bufferWrapped = false;
@@ -381,6 +387,10 @@ struct Granular : Module {
         activeBufferLen = audioBuffer.size();
         fileSampleRate = newSampleRate;
         grains.clear();
+
+        // <--- CHANGED: Reset raw voltage flag because WAVs are usually normalized
+        bufferIsRawVoltage = false;
+
         isLoading = false;
         isRecording = false;
     }
@@ -482,8 +492,9 @@ void WaveformDisplay::regenerateCache() {
                 float sample = module->audioBuffer[j];
 
                 // --- FIX 2A: SCALING FOR DISPLAY ---
-                // If recording, assume input is approx 5V, scale down to 1.0 range
-                if (module->isRecording) sample /= 5.0f;
+                // <--- CHANGED: Now using bufferIsRawVoltage instead of isRecording
+                // If the buffer contains raw 5V audio (recorded), scale down to 1.0 range
+                if (module->bufferIsRawVoltage) sample /= 5.0f;
 
                 if (sample < minSample) minSample = sample;
                 if (sample > maxSample) maxSample = sample;
