@@ -206,15 +206,16 @@ struct Granular : Module {
 
         // --- TRIGGER RECORD START ---
         if (recTrigger.process(recActive ? 10.f : 0.f)) {
-            // Protect against drawing while resizing
             isLoading = true;
 
             // Allocate 10s if buffer is small
             if (audioBuffer.size() < 44100) {
                 audioBuffer.resize(args.sampleRate * 10.0f);
-                std::fill(audioBuffer.begin(), audioBuffer.end(), 0.f);
                 fileSampleRate = args.sampleRate;
             }
+
+            // --- FIX 1: CLEAR BUFFER ON START TO PREVENT GHOSTS ---
+            std::fill(audioBuffer.begin(), audioBuffer.end(), 0.f);
 
             recHead = 0;
             bufferWrapped = false;
@@ -246,8 +247,6 @@ struct Granular : Module {
                     bufferWrapped = true;
                 }
 
-                // While recording, the "Active Length" is effectively the whole buffer
-                // so the user sees the full 10s capacity being filled
                 activeBufferLen = audioBuffer.size();
             }
             outputs[SINE_OUTPUT].setVoltage(0.f);
@@ -450,9 +449,6 @@ void WaveformDisplay::onDragMove(const DragMoveEvent& e) {
 void WaveformDisplay::regenerateCache() {
     if (!module || box.size.x <= 0) return;
 
-    // DECISION:
-    // If recording: use audioBuffer.size() (Total Capacity)
-    // If playback: use activeBufferLen (Trimmed Length)
     size_t targetLen = module->isRecording ? module->audioBuffer.size() : module->activeBufferLen;
 
     if (targetLen == 0 || targetLen > module->audioBuffer.size()) {
@@ -462,8 +458,6 @@ void WaveformDisplay::regenerateCache() {
 
     displayCache.resize(box.size.x);
     cacheBoxWidth = box.size.x;
-
-    // Store current state to detect changes
     cacheBufferSize = targetLen;
 
     float samplesPerPixel = (float)targetLen / box.size.x;
@@ -473,11 +467,10 @@ void WaveformDisplay::regenerateCache() {
         size_t endSample = (size_t)((i + 1) * samplesPerPixel);
         if (endSample > targetLen) endSample = targetLen;
 
-        float minSample = 1.f;
-        float maxSample = -1.f;
+        float minSample = 100.0f;
+        float maxSample = -100.0f;
 
         if (startSample >= endSample) {
-            // Safety check
             if (startSample < module->audioBuffer.size()) {
                  minSample = maxSample = module->audioBuffer[startSample];
             } else {
@@ -487,43 +480,53 @@ void WaveformDisplay::regenerateCache() {
             for (size_t j = startSample; j < endSample; j++) {
                 if (j >= module->audioBuffer.size()) break;
                 float sample = module->audioBuffer[j];
+
+                // --- FIX 2A: SCALING FOR DISPLAY ---
+                // If recording, assume input is approx 5V, scale down to 1.0 range
+                if (module->isRecording) sample /= 5.0f;
+
                 if (sample < minSample) minSample = sample;
                 if (sample > maxSample) maxSample = sample;
             }
         }
+
+        // --- FIX 2B: CLAMPING FOR DISPLAY ---
+        // Force visual range to -1 to 1 to stay within box
+        minSample = rack::math::clamp(minSample, -1.f, 1.f);
+        maxSample = rack::math::clamp(maxSample, -1.f, 1.f);
+
         displayCache[i] = {minSample, maxSample};
     }
 }
 
 
 void WaveformDisplay::draw(const DrawArgs& args) {
+    // --- FIX 3: SCISSORING (CROP) ---
+    // Prevent any drawing from spilling outside the widget box
+    nvgScissor(args.vg, 0, 0, box.size.x, box.size.y);
+
     nvgBeginPath(args.vg);
     nvgRect(args.vg, 0, 0, box.size.x, box.size.y);
     nvgFillColor(args.vg, nvgRGBA(20, 20, 20, 255));
     nvgFill(args.vg);
 
-    if (!module || module->isLoading) return;
+    if (!module || module->isLoading) {
+        nvgResetScissor(args.vg);
+        return;
+    }
 
     bool isRec = module->isRecording;
 
-    // 1. Detect state change (Stop Recording) -> Force Zoom Snap
     if (wasRecording && !isRec) {
         regenerateCache();
     }
     wasRecording = isRec;
 
-    // 2. Setup Dimensions
     size_t currentLen = isRec ? module->audioBuffer.size() : module->activeBufferLen;
 
-    // 3. Logic for LIVE updating
     if (isRec) {
-        // When recording, we are modifying the buffer, so we MUST regenerate
-        // the visualization to see the line moving.
-        // Optimization: In a super high-perf module, we'd only update the dirty pixel.
-        // For simplicity and robustness here, we regenerate.
         regenerateCache();
     } else {
-        // When playing, only regenerate if resize happened
         if (currentLen != cacheBufferSize || box.size.x != cacheBoxWidth) {
             regenerateCache();
         }
@@ -535,13 +538,13 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgFillColor(args.vg, nvgRGBA(255, 255, 255, 100));
         nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         nvgText(args.vg, box.size.x / 2, box.size.y / 2, "Drop WAV or REC", NULL);
+        nvgResetScissor(args.vg);
         return;
     }
 
     // --- Draw WAV ---
     nvgBeginPath(args.vg);
 
-    // If recording, use a reddish tint for the waveform so it looks "hot"
     if (isRec) nvgStrokeColor(args.vg, nvgRGBA(255, 100, 100, 150));
     else nvgStrokeColor(args.vg, nvgRGBA(100, 100, 100, 100));
 
@@ -556,7 +559,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     }
     nvgStroke(args.vg);
 
-    // --- Draw Recording Head (Bright Red Line) ---
+    // --- Draw Recording Head ---
     if (isRec && module->audioBuffer.size() > 0) {
         float recPos = (float)module->recHead / (float)module->audioBuffer.size();
         float recPixel = recPos * box.size.x;
@@ -568,7 +571,7 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgLineTo(args.vg, recPixel, box.size.y);
         nvgStroke(args.vg);
 
-        // Skip drawing Loop/Grain stuff while recording to reduce clutter
+        nvgResetScissor(args.vg);
         return;
     }
 
@@ -598,7 +601,6 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgStrokeColor(args.vg, nvgRGBA(0, 150, 255, 255));
     nvgStrokeWidth(args.vg, 1.5f);
     for (const Grain& grain : activeGrains) {
-        // Visual mapping uses current active length
         double wrappedBufferPos = std::fmod(grain.bufferPos, (double)currentLen);
         float grainX = (float)(wrappedBufferPos / currentLen) * box.size.x;
         nvgBeginPath(args.vg);
@@ -633,6 +635,9 @@ void WaveformDisplay::draw(const DrawArgs& args) {
     nvgMoveTo(args.vg, spawnX, 0);
     nvgLineTo(args.vg, spawnX, box.size.y);
     nvgStroke(args.vg);
+
+    // --- RESET SCISSOR ---
+    nvgResetScissor(args.vg);
 }
 
 
