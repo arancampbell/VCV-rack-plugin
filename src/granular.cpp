@@ -706,35 +706,54 @@ void WaveformDisplay::draw(const DrawArgs& args) {
         nvgStroke(args.vg);
     }
 
-    // --- Draw Loop Lines ---
+    // --- RESET SCISSOR ---
+    // We reset here so we can draw the UI lines (and their arrows) extending outside the box
+    nvgResetScissor(args.vg);
+
+    // --- Draw Loop Lines (Start/End) ---
     float startX = module->params[Granular::START_PARAM].getValue() * box.size.x;
     float endX = module->params[Granular::END_PARAM].getValue() * box.size.x;
 
     nvgBeginPath(args.vg);
     nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 200));
     nvgStrokeWidth(args.vg, 3.0f);
+
+    // Start Line
+    nvgMoveTo(args.vg, startX, box.size.y);
+    nvgLineTo(args.vg, startX, 0);
+    // Start Arrow
+    nvgLineTo(args.vg, startX - 4, -6);
+    nvgLineTo(args.vg, startX + 4, -6);
+    nvgLineTo(args.vg, startX, 0);
     nvgMoveTo(args.vg, startX, 0);
-    nvgLineTo(args.vg, startX, box.size.y);
-    nvgStroke(args.vg);
 
-    nvgBeginPath(args.vg);
-    nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 200));
-    nvgStrokeWidth(args.vg, 3.0f);
+    // End Line
+    nvgMoveTo(args.vg, endX, box.size.y);
+    nvgLineTo(args.vg, endX, 0);
+    // End Arrow
+    nvgLineTo(args.vg, endX - 4, -6);
+    nvgLineTo(args.vg, endX + 4, -6);
+    nvgLineTo(args.vg, endX, 0);
     nvgMoveTo(args.vg, endX, 0);
-    nvgLineTo(args.vg, endX, box.size.y);
+
     nvgStroke(args.vg);
 
-    // --- Draw Playhead ---
+    // --- Draw Playhead (Position) ---
     float spawnX = module->grainSpawnPosition * box.size.x;
+
     nvgBeginPath(args.vg);
     nvgStrokeColor(args.vg, nvgRGBA(255, 0, 0, 200));
     nvgStrokeWidth(args.vg, 2.0f);
-    nvgMoveTo(args.vg, spawnX, 0);
-    nvgLineTo(args.vg, spawnX, box.size.y);
-    nvgStroke(args.vg);
 
-    // --- RESET SCISSOR ---
-    nvgResetScissor(args.vg);
+    // Position Line
+    nvgMoveTo(args.vg, spawnX, box.size.y);
+    nvgLineTo(args.vg, spawnX, 0);
+    // Position Arrow
+    nvgLineTo(args.vg, spawnX - 4, -6);
+    nvgLineTo(args.vg, spawnX + 4, -6);
+    nvgLineTo(args.vg, spawnX, 0);
+    nvgMoveTo(args.vg, spawnX, 0);
+    nvgStroke(args.vg);
 }
 
 
