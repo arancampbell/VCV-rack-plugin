@@ -194,14 +194,23 @@ struct Granular : Module {
     struct SizeParamQuantity : rack::engine::ParamQuantity {
         std::string getDisplayValueString() override {
             Granular* mod = dynamic_cast<Granular*>(module);
+
+            // Check if module exists and Sync is active
             if (mod && mod->params[Granular::SYNC_PARAM].getValue() > 0.5f) {
+                // CLEAR the unit string so " s" isn't appended to "4 Bars"
+                unit = "";
+
                 // Map 0.01 - 2.0 to 0 - 1
                 float val = getValue();
                 float valNorm = rack::math::rescale(val, 0.01f, 2.0f, 0.f, 1.f);
                 valNorm = rack::math::clamp(valNorm, 0.f, 1.f);
                 int index = (int)(valNorm * (NUM_SYNC_DIVS - 1) + 0.5f);
+
                 if (index >= 0 && index < NUM_SYNC_DIVS) return SYNC_LABELS[index];
             }
+
+            // Restore the unit string for Free mode
+            unit = "s";
             return ParamQuantity::getDisplayValueString();
         }
     };
@@ -209,7 +218,12 @@ struct Granular : Module {
     struct DensityParamQuantity : rack::engine::ParamQuantity {
         std::string getDisplayValueString() override {
             Granular* mod = dynamic_cast<Granular*>(module);
+
+            // Check if module exists and Sync is active
             if (mod && mod->params[Granular::SYNC_PARAM].getValue() > 0.5f) {
+                // CLEAR the unit string so " Hz" isn't appended to "1/4"
+                unit = "";
+
                 // Map 1 - 100 to 0 - 1
                 float val = getValue();
                 float valNorm = rack::math::rescale(val, 1.f, 100.f, 0.f, 1.f);
@@ -220,6 +234,9 @@ struct Granular : Module {
                 int index = (int)(valNorm * (NUM_SYNC_DIVS - 1) + 0.5f);
                 if (index >= 0 && index < NUM_SYNC_DIVS) return SYNC_LABELS[index];
             }
+
+            // Restore the unit string for Free mode
+            unit = " Hz";
             return ParamQuantity::getDisplayValueString();
         }
     };
@@ -804,7 +821,7 @@ struct ShapeDisplay : rack::TransparentWidget {
         }
 
         nvgBeginPath(args.vg);
-        nvgStrokeColor(args.vg, nvgRGBA(0, 0, 0, 255));
+        nvgStrokeColor(args.vg, nvgRGBA(255, 255, 255, 255));
         nvgStrokeWidth(args.vg, 1.5f);
         nvgMoveTo(args.vg, 0, box.size.y);
 
@@ -870,11 +887,11 @@ struct GranularWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
         // --- NEW CONTROLS (BPM & SYNC) ---
-        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(10.0, 15.0)), module, Granular::BPM_PARAM));
-        addChild(createLabel(mm2px(Vec(4.0, 8.0)), "BPM"));
+        addParam(createParamCentered<RoundBlackKnob>(mm2px(Vec(10.0, 65.0)), module, Granular::BPM_PARAM));
+        addChild(createLabel(mm2px(Vec(7.0, 58.0)), "BPM"));
 
-        addParam(createParamCentered<CKSS>(mm2px(Vec(25.0, 15.0)), module, Granular::SYNC_PARAM));
-        addChild(createLabel(mm2px(Vec(20.0, 8.0)), "SYNC"));
+        addParam(createParamCentered<CKSS>(mm2px(Vec(10.0, 45.0)), module, Granular::SYNC_PARAM));
+        addChild(createLabel(mm2px(Vec(6.5, 38.0)), "SYNC"));
 
 
         // COMPRESSION_PARAM
